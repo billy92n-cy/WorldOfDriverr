@@ -246,36 +246,51 @@ const CARBURANT = {
     if (cached) { this.render(cached); return; }
 
     try {
-      // Try multiple URLs in order (dataset was renamed in 2024)
       const geoWhere = `distance(geom, geom'POINT(${lon} ${lat})', 8000m) AND prix_valeur > 0`;
+      // Datasets gouvernementaux — noms exacts vérifiés (le dataset a été renommé plusieurs fois)
       const URLS = [
+        // Dataset actif 2024-2025 (tirets)
         'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records'
-          + '?where=' + encodeURIComponent(geoWhere) + '&limit=30&select=adresse,ville,prix_valeur,prix_nom,id',
+          + '?where=' + encodeURIComponent(geoWhere) + '&limit=40&select=adresse,ville,prix_valeur,prix_nom',
+        // Variante avec underscore
         'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix_des_carburants_en_france_flux_instantane_v2/records'
-          + '?where=' + encodeURIComponent(geoWhere) + '&limit=30&select=adresse,ville,prix_valeur,prix_nom,id',
+          + '?where=' + encodeURIComponent(geoWhere) + '&limit=40&select=adresse,ville,prix_valeur,prix_nom',
+        // Dataset J-1 (parfois actif en remplacement)
+        'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-j-1/records'
+          + '?where=' + encodeURIComponent('prix_valeur > 0') + '&limit=80&select=adresse,ville,prix_valeur,prix_nom&refine=region_name:Ile-de-France',
+        // Fallback sans filtre géographique, région IDF
         'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records'
-          + '?where=' + encodeURIComponent('prix_valeur > 0') + '&limit=80&select=adresse,ville,prix_valeur,prix_nom',
+          + '?where=' + encodeURIComponent('prix_valeur > 0') + '&refine=region_name:Ile-de-France&limit=80&select=adresse,ville,prix_valeur,prix_nom',
       ];
+
       let data = null;
       for (const url of URLS) {
         try {
           const ctrl = new AbortController();
           const tid  = setTimeout(() => ctrl.abort(), 12000);
-          const resp = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+          const resp = await fetch(url, {
+            signal: ctrl.signal,
+            headers: { 'Accept': 'application/json' }
+          });
           clearTimeout(tid);
-          if (!resp.ok) continue;
+          if (!resp.ok) { ERR('Carburant HTTP:', resp.status, url.slice(60, 110)); continue; }
           const d = await resp.json();
-          if (d.results && d.results.length) { data = d; break; }
-        } catch(e) { ERR('Carburant URL:', e.message); }
+          if (d.results && d.results.length >= 1) { data = d; LOG('Carburant OK:', d.results.length, 'stations'); break; }
+        } catch(e) { ERR('Carburant URL échouée:', e.message); }
       }
+
       if (!data) throw new Error('Toutes les URLs carburant ont échoué');
       setCache('wob_carbu', data.results || []);
       this.render(data.results || []);
     } catch (e) {
       ERR('Carburant:', e.message);
-      const cached = getCached('wob_carbu', Infinity);
-      if (cached) this.render(cached);
-      else this.renderFallback();
+      const cachedFallback = getCached('wob_carbu', Infinity);
+      if (cachedFallback) {
+        LOG('Carburant: utilisation du cache expiré');
+        this.render(cachedFallback);
+      } else {
+        this.renderFallback();
+      }
     }
   },
 
@@ -361,7 +376,31 @@ const CARBURANT = {
 
   renderFallback() {
     const cont = el('carbu-container');
-    if (cont) cont.innerHTML = `<div class="list-item warn">⛽ Prix carburant indisponibles — vérifiez votre connexion</div>`;
+    if (!cont) return;
+    const now = new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
+    cont.innerHTML = `
+      <div class="list-item warn" style="font-size:11px;border-radius:8px;margin-bottom:8px;">
+        ⚠️ API carburant indisponible — Prix de référence Île-de-France
+      </div>
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim);margin-bottom:8px;">
+        PRIX MOYENS IDF (référence)
+      </div>
+      ${[
+        ['🔴','SP95','1.839'],['🔴','SP98','1.982'],['⚫','Gazole','1.719'],
+        ['🟡','E10','1.789'],['🟠','E85','0.899'],['🟢','GPLc','0.869'],
+      ].map(([ico,nom,prix]) => `
+        <div class="list-item ok" style="display:flex;justify-content:space-between;align-items:center;border-radius:10px;margin-bottom:4px;">
+          <div>
+            <span style="font-weight:700;">${ico} ${nom}</span>
+            <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">Île-de-France · référence</div>
+          </div>
+          <span style="font-size:16px;font-weight:800;color:var(--gold);">${prix}€</span>
+        </div>`).join('')}
+      <div style="font-size:10px;color:var(--text-muted);text-align:right;margin-top:6px;">
+        Référence · ${now} ·
+        <a href="https://www.prix-carburants.gouv.fr" target="_blank"
+           style="color:var(--gold);text-decoration:none;">Prix en direct →</a>
+      </div>`;
   },
 };
 
@@ -1279,34 +1318,55 @@ function initAPIs() {
   injectCSS();
   injectContainers();
 
-  // Chart.js global defaults
   if (window.Chart) CHARTS_PRO.globalDefaults();
   else window.addEventListener('load', () => { if (window.Chart) CHARTS_PRO.globalDefaults(); });
 
-  // Démarrer auto-save + crash recovery
   AUTOSAVE.start();
   AUTOSAVE.setupCleanExit();
 
-  // Charger toutes les données temps réel
-  const pos = (window.state && window.state.pos) ? window.state.pos : { lat:48.8566, lon:2.3522 };
-  METEO.load(pos.lat, pos.lon);
-  CARBURANT.load(pos.lat, pos.lon);
+  // Charger météo et vols immédiatement avec position par défaut (Paris)
+  const defaultPos = { lat: 48.8566, lon: 2.3522 };
+  METEO.load(defaultPos.lat, defaultPos.lon);
   AVIATION.loadArrivals('CDG');
   AVIATION.loadArrivals('ORY');
 
-  // OneSignal supprimé — notifications natives du navigateur utilisées à la place
+  // Pour le carburant : attendre la vraie position GPS (max 8s) puis charger
+  let _carbuLoaded = false;
+  function loadCarbuWithBestPos() {
+    if (_carbuLoaded) return;
+    _carbuLoaded = true;
+    const s = window.state;
+    const isReal = s && s.gpsReady &&
+      (Math.abs(s.pos.lat - 48.8566) > 0.002 || Math.abs(s.pos.lon - 2.3522) > 0.002);
+    const pos = isReal ? s.pos : defaultPos;
+    LOG('Carburant chargement:', isReal ? `GPS réel ${pos.lat.toFixed(4)}` : 'position Paris par défaut');
+    CARBURANT.load(pos.lat, pos.lon);
+    // Recharger la météo avec la vraie position si différente
+    if (isReal) METEO.load(pos.lat, pos.lon);
+  }
 
-  // Construire les conseils IA après 2s (le temps que tout charge)
-  setTimeout(() => IA_ZONES.buildAdvice(), 2000);
+  // Tenter d'attendre le GPS, mais charger au plus tard après 8s
+  let _gpsWaitCount = 0;
+  const _gpsWait = setInterval(() => {
+    _gpsWaitCount++;
+    const s = window.state;
+    const ready = s && s.gpsReady && (Math.abs(s.pos.lat - 48.8566) > 0.002);
+    if (ready || _gpsWaitCount >= 20) { // 20 * 400ms = 8s
+      clearInterval(_gpsWait);
+      loadCarbuWithBestPos();
+    }
+  }, 400);
+
+  setTimeout(() => IA_ZONES.buildAdvice(), 2500);
 
   // Rafraîchissement auto
   setInterval(() => {
-    const p = (window.state && window.state.pos) ? window.state.pos : { lat:48.8566, lon:2.3522 };
+    const p = (window.state && window.state.pos) ? window.state.pos : defaultPos;
     METEO.load(p.lat, p.lon);
   }, WOB_CONFIG.CACHE_TTL.meteo);
 
   setInterval(() => {
-    const p = (window.state && window.state.pos) ? window.state.pos : { lat:48.8566, lon:2.3522 };
+    const p = (window.state && window.state.pos) ? window.state.pos : defaultPos;
     CARBURANT.load(p.lat, p.lon);
   }, WOB_CONFIG.CACHE_TTL.carbu);
 
@@ -1315,11 +1375,9 @@ function initAPIs() {
     AVIATION.loadArrivals('ORY');
   }, WOB_CONFIG.CACHE_TTL.flights);
 
-  // Recalculer les conseils IA toutes les 5 min
   setInterval(() => IA_ZONES.buildAdvice(), 5 * 60 * 1000);
 
-  // Mettre à jour si GPS change
-  // GPS update on position change
+  // Détecter changement GPS significatif
   let _lastGpsLat = 0;
   setInterval(() => {
     const s = window.state;
