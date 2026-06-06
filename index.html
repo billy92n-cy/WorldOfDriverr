@@ -96,10 +96,12 @@
     <!-- ═══ ACCUEIL ═══ -->
     <section id="screen-home" class="screen active">
       <div class="screen-scroll">
+
+        <!-- HERO BÉNÉFICE NET -->
         <div class="hero-card">
           <div class="hero-glare"></div>
           <div class="hero-top">
-            <span class="hero-lbl">BÉNÉFICE NET</span>
+            <span class="hero-lbl">BÉNÉFICE NET · <span id="hero-week-label">Semaine en cours</span></span>
             <div class="hero-date" id="hero-date"></div>
           </div>
           <div class="hero-amount" id="hero-net">0,00 €</div>
@@ -117,8 +119,10 @@
               0,00 €
             </span>
           </div>
+          <div class="hero-reset-hint" id="hero-reset-hint"></div>
         </div>
 
+        <!-- MÉTRIQUES RAPIDES -->
         <div class="metrics-row">
           <div class="mtile">
             <svg class="mtile-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
@@ -137,58 +141,151 @@
           </div>
         </div>
 
-        <div class="card obj-card">
-          <div class="card-row-hd">
-            <span class="card-title">Objectifs</span>
+        <!-- ═══ WIDGET 1 : IMPORTER UNE COURSE ═══ -->
+        <div class="card trip-import-card">
+          <div class="card-row-hd" style="margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="trip-card-ico">🚗</div>
+              <span class="card-title" style="margin:0">Ajouter une course</span>
+            </div>
+            <span class="trip-week-badge" id="trip-count-badge">0 course(s)</span>
+          </div>
+
+          <div class="trip-form">
+            <div class="trip-form-row">
+              <div class="trip-field">
+                <label class="trip-lbl">💰 Prix (€)</label>
+                <input class="fi trip-input" id="trip-prix" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" oninput="HOME.onTripInput()">
+              </div>
+              <div class="trip-field">
+                <label class="trip-lbl">📍 Distance (km)</label>
+                <input class="fi trip-input" id="trip-km" type="number" inputmode="decimal" placeholder="0.0" step="0.1" min="0" oninput="HOME.onTripInput()">
+              </div>
+              <div class="trip-field">
+                <label class="trip-lbl">⏱ Durée (min)</label>
+                <input class="fi trip-input" id="trip-duree" type="number" inputmode="numeric" placeholder="0" step="1" min="0" oninput="HOME.onTripInput()">
+              </div>
+            </div>
+
+            <!-- Prévisualisation temps réel -->
+            <div class="trip-preview" id="trip-preview" style="display:none">
+              <div class="tp-item"><span class="tp-lbl">€/km</span><span class="tp-val" id="tp-ratio">—</span></div>
+              <div class="tp-item"><span class="tp-lbl">€/heure</span><span class="tp-val" id="tp-hourly">—</span></div>
+              <div class="tp-item"><span class="tp-lbl">Carb. estimé</span><span class="tp-val" id="tp-fuel">—</span></div>
+              <div class="tp-item"><span class="tp-lbl">Net course</span><span class="tp-val" id="tp-net" style="color:var(--gold)">—</span></div>
+            </div>
+
+            <button class="btn-gold trip-add-btn" onclick="HOME.addTrip()" id="trip-add-btn" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+              Enregistrer la course
+            </button>
+          </div>
+
+          <!-- Dernières courses -->
+          <div id="recent-trips" style="margin-top:12px"></div>
+        </div>
+
+        <!-- ═══ WIDGET 2 : REVENU JOUR / SEMAINE ═══ -->
+        <div class="card revenue-card">
+          <div class="card-row-hd" style="margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="trip-card-ico">📈</div>
+              <span class="card-title" style="margin:0">Revenus & Objectifs</span>
+            </div>
             <button class="btn-ghost-sm" onclick="openGoalModal()">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-              Modifier
+              Objectifs
             </button>
           </div>
-          <div class="obj-row"><span class="obj-lbl">Journalier</span><span class="obj-val" id="obj-day-val">0 / 0 €</span></div>
-          <div class="progress-track"><div class="progress-bar" id="prog-day"></div></div>
-          <div class="obj-row" style="margin-top:10px"><span class="obj-lbl">Hebdomadaire</span><span class="obj-val" id="obj-week-val">0 / 0 €</span></div>
-          <div class="progress-track"><div class="progress-bar" id="prog-week"></div></div>
-          <div class="obj-row" style="margin-top:10px"><span class="obj-lbl">Mensuel</span><span class="obj-val" id="obj-month-val">0 / 0 €</span></div>
-          <div class="progress-track"><div class="progress-bar" id="prog-month"></div></div>
-        </div>
 
-        <div class="card ia-card">
-          <div class="ia-hd">
-            <div class="ia-spark-wrap">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/></svg>
+          <div class="rev-grid">
+            <div class="rev-tile">
+              <div class="rev-tile-lbl">Aujourd'hui</div>
+              <div class="rev-tile-val" id="rev-day">0,00 €</div>
+              <div class="rev-tile-sub" id="rev-day-trips">0 courses</div>
             </div>
-            <span class="card-title" style="margin:0">Analyse IA</span>
-            <div class="ia-dots" id="ia-dots"><span></span><span></span><span></span></div>
-            <button class="btn-ghost-sm" onclick="generateIAReport()" style="margin-left:auto">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.93"/></svg>
-            </button>
+            <div class="rev-tile rev-tile-accent">
+              <div class="rev-tile-lbl">Cette semaine</div>
+              <div class="rev-tile-val" id="rev-week">0,00 €</div>
+              <div class="rev-tile-sub" id="rev-week-trips">0 courses</div>
+            </div>
           </div>
-          <p id="ia-report" class="ia-txt">Importez des CSV ou ajoutez des dépenses pour générer votre analyse.</p>
-          <div class="ia-projections" id="ia-projections"></div>
+
+          <!-- Objectif journalier -->
+          <div style="margin-top:12px">
+            <div class="obj-row"><span class="obj-lbl">Objectif jour</span><span class="obj-val" id="obj-day-val">0 / 0 €</span></div>
+            <div class="progress-track"><div class="progress-bar" id="prog-day"></div></div>
+            <div class="obj-row" style="margin-top:8px"><span class="obj-lbl">Objectif semaine</span><span class="obj-val" id="obj-week-val">0 / 0 €</span></div>
+            <div class="progress-track"><div class="progress-bar" id="prog-week"></div></div>
+            <div class="obj-row" style="margin-top:8px"><span class="obj-lbl">Objectif mois</span><span class="obj-val" id="obj-month-val">0 / 0 €</span></div>
+            <div class="progress-track"><div class="progress-bar" id="prog-month"></div></div>
+          </div>
         </div>
 
-        <div class="card">
-          <div class="card-row-hd">
-            <span class="card-title">Dépenses</span>
-            <button class="btn-ghost-sm" onclick="openDepenseModal()">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-              Ajouter
-            </button>
+        <!-- ═══ WIDGET 3 : COÛT CARBURANT + TEMPS DE TRAVAIL ═══ -->
+        <div class="card fuel-work-card">
+          <div class="card-row-hd" style="margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="trip-card-ico">⛽</div>
+              <span class="card-title" style="margin:0">Carburant & Temps de travail</span>
+            </div>
+          </div>
+
+          <div class="fw-grid">
+            <div class="fw-tile">
+              <div class="fw-ico">⛽</div>
+              <div class="fw-val" id="fw-fuel-cost">0,00 €</div>
+              <div class="fw-lbl">Carburant semaine</div>
+            </div>
+            <div class="fw-tile">
+              <div class="fw-ico">🕐</div>
+              <div class="fw-val" id="fw-work-time">0h 00</div>
+              <div class="fw-lbl">Temps de travail</div>
+            </div>
+            <div class="fw-tile">
+              <div class="fw-ico">💸</div>
+              <div class="fw-val" id="fw-net">0,00 €</div>
+              <div class="fw-lbl">Net semaine</div>
+            </div>
+            <div class="fw-tile">
+              <div class="fw-ico">⚡</div>
+              <div class="fw-val" id="fw-hourly-rate">0,00 €</div>
+              <div class="fw-lbl">Taux horaire</div>
+            </div>
+          </div>
+
+          <div class="fw-detail" id="fw-detail">
+            <div class="cost-row"><span>Gains bruts</span><span id="c-brut" class="val-green">0,00 €</span></div>
+            <div class="cost-row"><span>Carburant estimé</span><span id="c-carb" class="val-red">0,00 €</span></div>
+            <div class="cost-row"><span>Autres dépenses</span><span id="c-dep" class="val-red">0,00 €</span></div>
+            <div class="cost-row cost-total"><span>Bénéfice net</span><span id="c-net" class="val-gold">0,00 €</span></div>
+          </div>
+
+          <!-- Dépenses rapides -->
+          <div class="card-row-hd" style="margin-top:14px;margin-bottom:8px">
+            <span class="card-title" style="font-size:.78rem">Dépenses</span>
+            <button class="btn-ghost-sm" onclick="openDepenseModal()">+ Ajouter</button>
           </div>
           <div id="depenses-list" class="dep-list"><p class="empty-hint">Aucune dépense enregistrée.</p></div>
           <div class="dep-total-row"><span>Total dépenses</span><span id="dep-total" class="val-red">0,00 €</span></div>
         </div>
 
-        <div class="card">
-          <span class="card-title">Détail financier</span>
-          <div class="costs-grid">
-            <div class="cost-row"><span>Gains bruts</span><span id="c-brut" class="val-green">0,00 €</span></div>
-            <div class="cost-row"><span>Carburant</span><span id="c-carb" class="val-red">0,00 €</span></div>
-            <div class="cost-row"><span>Autres dépenses</span><span id="c-dep" class="val-red">0,00 €</span></div>
-            <div class="cost-row cost-total"><span>Bénéfice net</span><span id="c-net" class="val-gold">0,00 €</span></div>
+        <!-- ═══ WIDGET 4 : IA COACH CHAUFFEUR ═══ -->
+        <div class="card ia-coach-card">
+          <div class="ia-hd">
+            <div class="ia-spark-wrap">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/></svg>
+            </div>
+            <span class="card-title" style="margin:0">IA Coach Chauffeur</span>
+            <div class="ia-dots" id="ia-dots"><span></span><span></span><span></span></div>
+            <button class="btn-ghost-sm" onclick="HOME.generateCoachReport()" style="margin-left:auto" title="Actualiser l'analyse">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.93"/></svg>
+            </button>
           </div>
+          <div id="ia-report" class="ia-txt">Enregistrez vos premières courses pour recevoir votre analyse personnalisée.</div>
+          <div class="ia-projections" id="ia-projections"></div>
         </div>
+
       </div>
     </section>
 
@@ -661,6 +758,70 @@
 
 <div id="toast" class="toast"></div>
 
+<style>
+/* ══ ACCUEIL — Nouveaux widgets ══ */
+.hero-reset-hint {
+  font-size:.62rem; color:rgba(212,168,67,.45); text-align:right;
+  margin-top:6px; letter-spacing:.04em;
+}
+.trip-card-ico {
+  width:30px;height:30px;border-radius:8px;flex-shrink:0;
+  background:rgba(212,168,67,.1);border:1px solid rgba(212,168,67,.2);
+  display:flex;align-items:center;justify-content:center;font-size:14px;
+}
+.trip-week-badge {
+  font-size:.62rem;font-weight:700;background:rgba(212,168,67,.1);
+  border:1px solid rgba(212,168,67,.2);border-radius:20px;padding:3px 10px;
+  color:var(--gold);white-space:nowrap;
+}
+/* Formulaire course */
+.trip-form-row {
+  display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;
+}
+.trip-field { display:flex;flex-direction:column;gap:4px; }
+.trip-lbl   { font-size:.62rem;font-weight:700;color:var(--text-dim);letter-spacing:.06em; }
+.trip-input { text-align:center;font-family:'DM Mono',monospace;font-weight:700; }
+/* Prévisualisation */
+.trip-preview {
+  display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;
+  background:rgba(212,168,67,.05);border:1px solid rgba(212,168,67,.12);
+  border-radius:12px;padding:10px;margin-bottom:10px;
+}
+.tp-item  { display:flex;flex-direction:column;gap:2px;text-align:center; }
+.tp-lbl   { font-size:.55rem;color:var(--text-dim);letter-spacing:.06em;text-transform:uppercase; }
+.tp-val   { font-size:.78rem;font-weight:700;font-family:'DM Mono',monospace; }
+.trip-add-btn { width:100%;border-radius:12px; }
+.trip-add-btn:disabled { opacity:.4;cursor:not-allowed; }
+.trip-item-ico { font-size:1.1rem;flex-shrink:0; }
+/* Revenue widget */
+.rev-grid {
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;
+}
+.rev-tile {
+  background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);
+  border-radius:14px;padding:12px;text-align:center;
+}
+.rev-tile-accent {
+  background:rgba(212,168,67,.06);border-color:rgba(212,168,67,.2);
+}
+.rev-tile-lbl { font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px; }
+.rev-tile-val { font-size:1.3rem;font-weight:800;color:var(--gold);font-family:'DM Mono',monospace;letter-spacing:-.02em; }
+.rev-tile-sub { font-size:.62rem;color:var(--text-dim);margin-top:3px; }
+/* Fuel & Work widget */
+.fw-grid {
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;
+}
+.fw-tile {
+  background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);
+  border-radius:12px;padding:10px;text-align:center;
+}
+.fw-ico  { font-size:1.2rem;margin-bottom:4px; }
+.fw-val  { font-size:1rem;font-weight:800;font-family:'DM Mono',monospace;color:var(--text); }
+.fw-lbl  { font-size:.58rem;color:var(--text-dim);margin-top:2px; }
+.fw-detail { margin-top:4px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06); }
+/* IA Coach */
+.ia-coach-card { background:linear-gradient(145deg,rgba(10,8,2,.9),rgba(16,12,4,.92),rgba(10,15,26,.9)); }
+</style>
 <script src="app.js"></script>
 <script src="api.js"></script>
 <script src="wod-signature.js"></script>

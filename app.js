@@ -87,7 +87,9 @@ window.unlockApp = function() {
 //  INIT
 // ══════════════════════════════════════════════════
 function initApp() {
+  checkWeeklyReset(); // ← Reset lundi 4h00
   restoreAll();
+  HOME.init();       // ← Nouveaux widgets accueil
   startGPS();
   initMap();
   renderRushChart();
@@ -298,10 +300,6 @@ function restoreAll() {
 
   const iaText = ls('wob_ia');
   if (iaText && $('ia-report')) $('ia-report').textContent = iaText;
-
-  const files = JSON.parse(ls('wob_files') || '[]');
-  const list  = $('csv-files-list');
-  if (list && files.length) list.innerHTML = files.map(f => `<div class="list-item ok">${svgCheck()} ${f}</div>`).join('');
 
   ['uber','bolt'].forEach(p => {
     const v = ls(`wob_status_${p}`);
@@ -1991,5 +1989,483 @@ function haptic(pattern) {
 function svgCheck() {
   return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><polyline points="20 6 9 17 4 12"/></svg>`;
 }
+// ══════════════════════════════════════════════════
+//  RESET HEBDOMADAIRE — Lundi 4h00 du matin
+//  Supprime les stats courses pour alléger la sauvegarde
+// ══════════════════════════════════════════════════
+function checkWeeklyReset() {
+  const now     = new Date();
+  const dayOfW  = now.getDay();       // 0=Dim, 1=Lun
+  const hour    = now.getHours();
+  const lastKey = 'wob_last_weekly_reset';
+  const lastReset = parseInt(ls(lastKey) || '0');
+
+  // Fenêtre de déclenchement : Lundi entre 4h00 et 4h59
+  if (dayOfW === 1 && hour === 4) {
+    const lastResetDate = new Date(lastReset);
+    // Eviter de re-déclencher si déjà fait cette semaine
+    const mondayThisWeek = new Date(now);
+    mondayThisWeek.setHours(0, 0, 0, 0);
+    mondayThisWeek.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+
+    if (lastReset < mondayThisWeek.getTime()) {
+      _doWeeklyReset();
+      setLS(lastKey, Date.now().toString());
+    }
+  }
+}
+
+function _doWeeklyReset() {
+  // Sauvegarder dans l'historique avant de reset
+  const snapshot = {
+    ts:        Date.now(),
+    weekLabel: _getWeekLabel(new Date()),
+    gain:      parseFloat(ls('wob_gain'))  || 0,
+    km:        parseFloat(ls('wob_km'))    || 0,
+    trips:     parseInt(ls('wob_trips'))   || 0,
+    workMin:   parseInt(ls('wob_work_minutes')) || 0,
+  };
+  const history = JSON.parse(ls('wob_week_history') || '[]');
+  history.unshift(snapshot);
+  // Garder seulement 12 semaines d'historique
+  setLS('wob_week_history', JSON.stringify(history.slice(0, 12)));
+
+  // Effacer les stats hebdomadaires (garder profil, docs, dépenses)
+  const RESET_KEYS = [
+    'wob_gain','wob_km','wob_trips','wob_sessions',
+    'wob_platforms','wob_hours','wob_weekday',
+    'wob_ia','wob_work_minutes',
+  ];
+  RESET_KEYS.forEach(k => localStorage.removeItem(k));
+
+  // Réinitialiser le state en mémoire
+  state.totalGain    = 0;
+  state.totalKm      = 0;
+  state.totalTrips   = 0;
+  state.sessions     = [];
+  state.platformData = {};
+  state.hourData     = new Array(24).fill(0);
+  state.weekdayData  = new Array(7).fill(0);
+
+  console.log('[WOD] Reset hebdomadaire effectué —', new Date().toLocaleString('fr-FR'));
+}
+
+function _getWeekLabel(date) {
+  const d   = new Date(date);
+  const day = d.getDay();
+  const mon = new Date(d); mon.setDate(d.getDate() - ((day + 6) % 7)); mon.setHours(0,0,0,0);
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  const fmt = (d) => `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}`;
+  return `Sem. ${fmt(mon)}–${fmt(sun)}`;
+}
+
+// Programmation du reset à 4h lundi (vérif. toutes les heures)
+function scheduleWeeklyResetCheck() {
+  setInterval(checkWeeklyReset, 60 * 60 * 1000); // Vérif. toutes les heures
+}
+
+// ══════════════════════════════════════════════════
+//  HOME MODULE — Widgets accueil
+//  Import course · Revenus Jour/Semaine · Carburant
+//  & Temps de travail · IA Coach Chauffeur
+// ══════════════════════════════════════════════════
+const HOME = {
+  init() {
+    this._restoreTrips();
+    this._updateRevenueWidget();
+    this._updateFuelWorkWidget();
+    this._updateNextReset();
+    scheduleWeeklyResetCheck();
+    // Auto-refresh toutes les minutes
+    setInterval(() => {
+      this._updateRevenueWidget();
+      this._updateFuelWorkWidget();
+      this._updateNextReset();
+    }, 60000);
+  },
+
+  // ── Lecture / Sauvegarde ──────────────────────────
+  _getTrips() {
+    return JSON.parse(ls('wob_sessions') || '[]');
+  },
+  _saveTrips(trips) {
+    setLS('wob_sessions', JSON.stringify(trips));
+  },
+  _restoreTrips() {
+    const trips = this._getTrips();
+    this._renderRecentTrips(trips);
+    const badge = $('trip-count-badge');
+    if (badge) badge.textContent = `${trips.length} course(s)`;
+  },
+
+  // ── Prévisualisation temps réel ──────────────────
+  onTripInput() {
+    const prix  = parseFloat($('trip-prix')?.value)  || 0;
+    const km    = parseFloat($('trip-km')?.value)    || 0;
+    const duree = parseFloat($('trip-duree')?.value) || 0;
+    const btn   = $('trip-add-btn');
+    const prev  = $('trip-preview');
+
+    if (prix > 0) {
+      if (btn) btn.disabled = false;
+      if (prev) prev.style.display = 'grid';
+
+      const conso     = parseFloat(ls('wob_conso')) || 6.5;
+      const prixCarb  = parseFloat(ls('wob_prix'))  || 1.85;
+      const fuelCost  = km > 0 ? km * (conso / 100) * prixCarb : 0;
+      const netCourse = prix - fuelCost;
+      const ratioKm   = km > 0 ? prix / km : 0;
+      const hourly    = duree > 0 ? (prix / duree) * 60 : 0;
+
+      setText('tp-ratio',   km > 0 ? `${ratioKm.toFixed(2)} €/km` : '—');
+      setText('tp-hourly',  duree > 0 ? `${hourly.toFixed(2)} €/h` : '—');
+      setText('tp-fuel',    km > 0 ? `-${fuelCost.toFixed(2)} €` : '—');
+      setText('tp-net',     `${netCourse.toFixed(2)} €`);
+
+      // Couleur net
+      const netEl = $('tp-net');
+      if (netEl) netEl.style.color = netCourse > 0 ? 'var(--gold)' : 'var(--red)';
+    } else {
+      if (btn) btn.disabled = true;
+      if (prev) prev.style.display = 'none';
+    }
+  },
+
+  // ── Ajouter une course ───────────────────────────
+  addTrip() {
+    const prix  = parseFloat($('trip-prix')?.value);
+    const km    = parseFloat($('trip-km')?.value)    || 0;
+    const duree = parseFloat($('trip-duree')?.value) || 0;
+
+    if (!prix || prix <= 0) { showToast('Entrez un prix valide'); return; }
+
+    const now = new Date();
+    const trip = {
+      id:      Date.now(),
+      gain:    prix,
+      km:      km,
+      duree:   duree, // en minutes
+      date:    now.toISOString(),
+      hour:    now.getHours(),
+      weekday: now.getDay(),
+    };
+
+    // Ajouter au state
+    state.totalGain  += prix;
+    state.totalKm    += km;
+    state.totalTrips += 1;
+    if (trip.hour !== undefined) state.hourData[trip.hour] += prix;
+    if (trip.weekday !== undefined) state.weekdayData[trip.weekday] += prix;
+
+    const trips = this._getTrips();
+    trips.push(trip);
+    this._saveTrips(trips);
+
+    // Cumul temps de travail
+    if (duree > 0) {
+      const prevMin = parseInt(ls('wob_work_minutes') || '0');
+      setLS('wob_work_minutes', (prevMin + duree).toString());
+    }
+
+    // Sauvegarder tout
+    setLS('wob_gain',      state.totalGain);
+    setLS('wob_km',        state.totalKm);
+    setLS('wob_trips',     state.totalTrips);
+    setLS('wob_hours',     JSON.stringify(state.hourData));
+    setLS('wob_weekday',   JSON.stringify(state.weekdayData));
+    if (!ls('wob_first_session_ts')) setLS('wob_first_session_ts', Date.now().toString());
+
+    // Reset formulaire
+    if ($('trip-prix'))  $('trip-prix').value  = '';
+    if ($('trip-km'))    $('trip-km').value    = '';
+    if ($('trip-duree')) $('trip-duree').value = '';
+    const prev = $('trip-preview'); if (prev) prev.style.display = 'none';
+    const btn  = $('trip-add-btn'); if (btn) btn.disabled = true;
+
+    // Rafraîchir
+    this._renderRecentTrips(trips);
+    const badge = $('trip-count-badge');
+    if (badge) badge.textContent = `${trips.length} course(s)`;
+    this._updateRevenueWidget();
+    this._updateFuelWorkWidget();
+    updateDashboard();
+
+    // IA coaching auto si 5 courses ou multiple de 10
+    if (trips.length === 5 || (trips.length > 0 && trips.length % 10 === 0)) {
+      setTimeout(() => this.generateCoachReport(), 500);
+    }
+
+    haptic([20, 10, 40]);
+    showToast(`✅ Course +${formatEuro(prix)} enregistrée`);
+  },
+
+  // ── Supprimer une course ──────────────────────────
+  deleteTrip(id) {
+    const trips = this._getTrips();
+    const trip  = trips.find(t => t.id === id);
+    if (!trip) return;
+
+    state.totalGain  = Math.max(0, state.totalGain  - trip.gain);
+    state.totalKm    = Math.max(0, state.totalKm    - trip.km);
+    state.totalTrips = Math.max(0, state.totalTrips - 1);
+
+    const newTrips = trips.filter(t => t.id !== id);
+    this._saveTrips(newTrips);
+    setLS('wob_gain',  state.totalGain);
+    setLS('wob_km',    state.totalKm);
+    setLS('wob_trips', state.totalTrips);
+
+    if (trip.duree > 0) {
+      const prevMin = parseInt(ls('wob_work_minutes') || '0');
+      setLS('wob_work_minutes', Math.max(0, prevMin - trip.duree).toString());
+    }
+
+    this._renderRecentTrips(newTrips);
+    const badge = $('trip-count-badge');
+    if (badge) badge.textContent = `${newTrips.length} course(s)`;
+    this._updateRevenueWidget();
+    this._updateFuelWorkWidget();
+    updateDashboard();
+    showToast('Course supprimée');
+  },
+
+  // ── Afficher les dernières courses ───────────────
+  _renderRecentTrips(trips) {
+    const el = $('recent-trips'); if (!el) return;
+    if (!trips.length) { el.innerHTML = ''; return; }
+    const recent = [...trips].reverse().slice(0, 5);
+    el.innerHTML = `
+      <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim);margin-bottom:6px;">Dernières courses</div>
+      ${recent.map(t => {
+        const d    = new Date(t.date);
+        const time = d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+        const day  = d.toLocaleDateString('fr-FR', { weekday:'short', day:'numeric', month:'short' });
+        const conso    = parseFloat(ls('wob_conso')) || 6.5;
+        const pCarb    = parseFloat(ls('wob_prix')) || 1.85;
+        const fuel     = t.km > 0 ? t.km * (conso/100) * pCarb : 0;
+        const net      = t.gain - fuel;
+        const ratioStr = t.km > 0 ? `${(t.gain/t.km).toFixed(2)}€/km` : '';
+        const timeStr  = t.duree > 0 ? `${t.duree}min` : '';
+        return `
+          <div class="trip-item" style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;margin-bottom:4px;">
+            <div class="trip-item-ico">🚗</div>
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-weight:700;font-size:.82rem;">${formatEuro(t.gain)}</span>
+                <span style="font-size:.88rem;font-weight:800;color:${net >= 0 ? 'var(--gold)' : 'var(--red)'};">${formatEuro(net)} net</span>
+              </div>
+              <div style="font-size:.68rem;color:var(--text-dim);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap;">
+                <span>📅 ${day} ${time}</span>
+                ${t.km > 0 ? `<span>📍 ${t.km}km</span>` : ''}
+                ${ratioStr ? `<span>⚡ ${ratioStr}</span>` : ''}
+                ${timeStr  ? `<span>⏱ ${timeStr}</span>` : ''}
+              </div>
+            </div>
+            <button onclick="HOME.deleteTrip(${t.id})" style="background:rgba(255,77,106,.1);border:1px solid rgba(255,77,106,.2);color:var(--red);border-radius:8px;padding:5px 8px;cursor:pointer;font-size:.7rem;flex-shrink:0;">✕</button>
+          </div>`;
+      }).join('')}`;
+  },
+
+  // ── Widget Revenus ───────────────────────────────
+  _updateRevenueWidget() {
+    const now   = new Date();
+    const trips = this._getTrips();
+
+    // Calcul jour
+    const todayTrips = trips.filter(t => {
+      if (!t.date) return false;
+      const d = new Date(t.date);
+      return d.getFullYear() === now.getFullYear() &&
+             d.getMonth()    === now.getMonth()    &&
+             d.getDate()     === now.getDate();
+    });
+    const dayGain  = todayTrips.reduce((s, t) => s + (t.gain || 0), 0);
+    const dayCount = todayTrips.length;
+
+    // Calcul semaine (lundi → dimanche)
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    monday.setHours(0, 0, 0, 0);
+    const weekTrips = trips.filter(t => t.date && new Date(t.date) >= monday);
+    const weekGain  = weekTrips.reduce((s, t) => s + (t.gain || 0), 0);
+    const weekCount = weekTrips.length;
+
+    setText('rev-day',        formatEuro(dayGain));
+    setText('rev-day-trips',  `${dayCount} course${dayCount > 1 ? 's' : ''}`);
+    setText('rev-week',       formatEuro(weekGain));
+    setText('rev-week-trips', `${weekCount} course${weekCount > 1 ? 's' : ''}`);
+
+    // Objectifs
+    const goals     = state.goals || { day:0, week:0, month:0 };
+    const monthGain = trips.reduce((s, t) => s + (t.gain || 0), 0);
+    setText('obj-day-val',   `${formatEuro(dayGain)} / ${formatEuro(goals.day)}`);
+    setText('obj-week-val',  `${formatEuro(weekGain)} / ${formatEuro(goals.week)}`);
+    setText('obj-month-val', `${formatEuro(monthGain)} / ${formatEuro(goals.month)}`);
+    setProgress('prog-day',   goals.day   > 0 ? (dayGain  / goals.day)   * 100 : 0);
+    setProgress('prog-week',  goals.week  > 0 ? (weekGain / goals.week)  * 100 : 0);
+    setProgress('prog-month', goals.month > 0 ? (monthGain / goals.month) * 100 : 0);
+  },
+
+  // ── Widget Carburant & Temps de travail ──────────
+  _updateFuelWorkWidget() {
+    const trips   = this._getTrips();
+    const conso   = parseFloat(ls('wob_conso')) || 6.5;
+    const pCarb   = parseFloat(ls('wob_prix'))  || 1.85;
+
+    // Semaine courante
+    const now    = new Date();
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    monday.setHours(0, 0, 0, 0);
+    const weekTrips = trips.filter(t => t.date && new Date(t.date) >= monday);
+
+    const weekKm      = weekTrips.reduce((s, t) => s + (t.km || 0), 0);
+    const weekGain    = weekTrips.reduce((s, t) => s + (t.gain || 0), 0);
+    const weekDuree   = weekTrips.reduce((s, t) => s + (t.duree || 0), 0);
+    const fuelCost    = weekKm * (conso / 100) * pCarb;
+    const totalDep    = state.depenses.reduce((s, d) => s + d.montant, 0);
+    const netWeek     = weekGain - fuelCost - totalDep;
+    const hourlyRate  = weekDuree > 0 ? (weekGain / weekDuree) * 60 : 0;
+
+    const h   = Math.floor(weekDuree / 60);
+    const m   = weekDuree % 60;
+
+    setText('fw-fuel-cost',   formatEuro(fuelCost));
+    setText('fw-work-time',   `${h}h ${m.toString().padStart(2,'0')}`);
+    setText('fw-net',         formatEuro(netWeek));
+    setText('fw-hourly-rate', `${hourlyRate.toFixed(2)} €/h`);
+
+    // Couleur taux horaire
+    const hrEl = $('fw-hourly-rate');
+    if (hrEl) hrEl.style.color = hourlyRate >= 15 ? 'var(--gold)' : hourlyRate >= 10 ? '#ffc107' : 'var(--red)';
+  },
+
+  // ── Info prochain reset ──────────────────────────
+  _updateNextReset() {
+    const el = $('hero-reset-hint'); if (!el) return;
+    const now     = new Date();
+    const day     = now.getDay(); // 0=dim
+    // Prochain lundi 4h
+    const daysUntilMonday = day === 1 ? (now.getHours() >= 4 ? 7 : 0) : (8 - day) % 7;
+    const nextReset = new Date(now);
+    nextReset.setDate(now.getDate() + daysUntilMonday);
+    nextReset.setHours(4, 0, 0, 0);
+    const diffH = Math.round((nextReset - now) / 3600000);
+    el.textContent = diffH < 24
+      ? `🔄 Reset dans ${diffH}h`
+      : `🔄 Reset lundi prochain`;
+    el.title = `Reset automatique le ${nextReset.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' })} à 04h00`;
+  },
+
+  // ── IA Coach Chauffeur ───────────────────────────
+  async generateCoachReport() {
+    const iaEl  = $('ia-report');
+    const dotEl = $('ia-dots');
+    if (!iaEl) return;
+
+    const trips = this._getTrips();
+    if (!trips.length) {
+      iaEl.textContent = 'Enregistrez vos premières courses pour recevoir votre analyse personnalisée.';
+      return;
+    }
+
+    dotEl?.classList.add('active');
+    iaEl.textContent = '⏳ Analyse de vos courses en cours...';
+
+    const conso    = parseFloat(ls('wob_conso')) || 6.5;
+    const pCarb    = parseFloat(ls('wob_prix'))  || 1.85;
+    const vehType  = ls('wob_veh_type') || 'essence';
+
+    // Stats courses
+    const gains    = trips.map(t => t.gain);
+    const total    = gains.reduce((a, b) => a + b, 0);
+    const avg      = total / trips.length;
+    const best     = Math.max(...gains);
+    const worst    = Math.min(...gains);
+    const totalKm  = trips.reduce((s, t) => s + (t.km || 0), 0);
+    const totalMin = trips.reduce((s, t) => s + (t.duree || 0), 0);
+    const fuelCost = totalKm * (conso / 100) * pCarb;
+    const net      = total - fuelCost;
+    const hourly   = totalMin > 0 ? (total / totalMin) * 60 : 0;
+    const ratioKm  = totalKm > 0 ? total / totalKm : 0;
+
+    // Répartition horaire
+    const hourDist = {};
+    trips.forEach(t => {
+      if (!t.date) return;
+      const h = new Date(t.date).getHours();
+      const bracket = h < 6 ? 'nuit (0-6h)' : h < 10 ? 'matin (6-10h)' : h < 14 ? 'midi (10-14h)' : h < 18 ? 'après-midi (14-18h)' : h < 22 ? 'soir (18-22h)' : 'soirée (22-0h)';
+      hourDist[bracket] = (hourDist[bracket] || 0) + 1;
+    });
+    const bestHour = Object.entries(hourDist).sort((a,b) => b[1]-a[1])[0];
+
+    // Courses sous-performantes (< 80% de la moyenne)
+    const lowPerf = trips.filter(t => t.km > 0 && t.gain / t.km < ratioKm * 0.8).length;
+
+    const prompt = `Tu es un coach expert VTC parisien. Analyse ces données de courses et fournis des conseils CONCRETS, ENGAGEANTS et PROFESSIONNELS en 4-6 phrases max. Sois direct, actionnable, motivant.
+
+DONNÉES CHAUFFEUR (${trips.length} courses enregistrées) :
+- Gains bruts : ${total.toFixed(2)}€
+- Moyenne/course : ${avg.toFixed(2)}€ (meilleure: ${best.toFixed(2)}€, plus faible: ${worst.toFixed(2)}€)
+- Distance totale : ${totalKm.toFixed(0)} km
+- Ratio : ${ratioKm.toFixed(2)} €/km
+- Taux horaire : ${hourly.toFixed(2)} €/h
+- Carburant estimé : ${fuelCost.toFixed(2)}€ · Bénéfice net : ${net.toFixed(2)}€
+- Véhicule : ${vehType}
+- Meilleur créneau : ${bestHour ? `${bestHour[0]} (${bestHour[1]} courses)` : 'non défini'}
+- Courses sous-performantes (< 2,5€/km) : ${lowPerf}/${trips.length}
+
+OBJECTIFS PROFIL : journalier ${state.goals?.day || 0}€, hebdo ${state.goals?.week || 0}€
+
+Fournis : 1 constat clé sur les performances, 2 actions immédiates pour optimiser les revenus (créneaux, zones, type de courses), 1 conseil sur l'efficacité carburant.`;
+
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 600,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+      if (!resp.ok) throw new Error(`API ${resp.status}`);
+      const data = await resp.json();
+      const text = data.content?.map(c => c.text || '').join('') || '';
+      iaEl.textContent = text;
+      setLS('wob_ia', text);
+    } catch {
+      // Fallback local engageant
+      let txt = `📊 ${trips.length} courses · ${total.toFixed(2)}€ bruts · moyenne ${avg.toFixed(2)}€/course.`;
+      if (hourly < 12) txt += ` ⚠️ Taux horaire faible (${hourly.toFixed(1)}€/h) — privilégiez les courses CDG/Orly (15-30€) aux courtes distances.`;
+      else txt += ` ✅ Bon taux horaire (${hourly.toFixed(1)}€/h) — continuez sur cette lancée !`;
+      if (lowPerf > trips.length * 0.3) txt += ` 🎯 ${lowPerf} courses sous 2,5€/km détectées — refusez les courses < 8€ en heures creuses.`;
+      if (bestHour) txt += ` 🕐 Votre meilleur créneau : ${bestHour[0]} — concentrez-vous sur ces heures.`;
+      iaEl.textContent = txt;
+      setLS('wob_ia', txt);
+    } finally {
+      dotEl?.classList.remove('active');
+      // Projections
+      this._renderProjections(avg, trips.length);
+    }
+  },
+
+  _renderProjections(avgPerTrip, tripsCount) {
+    const projEl = $('ia-projections'); if (!projEl || tripsCount === 0) return;
+    const elapsed = Math.max(1, getElapsedDays());
+    const tpd     = tripsCount / elapsed;
+    const projD   = avgPerTrip * tpd;
+    const projW   = projD * 7;
+    const projM   = projD * 30;
+    projEl.innerHTML = `
+      <div class="proj-card"><div class="proj-lbl">Projection/jour</div><div class="proj-val">${formatEuro(projD)}</div></div>
+      <div class="proj-card"><div class="proj-lbl">Projection/semaine</div><div class="proj-val">${formatEuro(projW)}</div></div>
+      <div class="proj-card"><div class="proj-lbl">Projection/mois</div><div class="proj-val">${formatEuro(projM)}</div></div>`;
+    if ($('stats-projections')) $('stats-projections').innerHTML = projEl.innerHTML;
+  },
+};
+window.HOME = HOME;
+window.generateIAReport = () => HOME.generateCoachReport();
+
 // Expose state globally for api.js
 window.state = state;
