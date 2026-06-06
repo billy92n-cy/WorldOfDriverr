@@ -32,10 +32,11 @@
       <div class="splash-ring r1"></div>
       <div class="splash-ring r2"></div>
       <div class="splash-ring r3"></div>
-      <img id="splash-logo-img" src="./icon-192.png" alt="WOD"
-        style="width:110px;height:110px;border-radius:50%;object-fit:cover;
-               border:2px solid rgba(212,168,67,0.6);
-               box-shadow:0 0 30px rgba(212,168,67,0.35);
+      <img id="splash-logo-img" src="./IMG_4074.PNG" alt="WOD"
+        onerror="this.src='./icon-192.png'"
+        style="width:130px;height:130px;border-radius:0;object-fit:contain;
+               background:transparent;
+               filter:drop-shadow(0 0 30px rgba(212,168,67,0.8));
                position:relative;z-index:3;display:none;">
     </div>
     <div class="splash-brand">
@@ -58,9 +59,12 @@
   <!-- HEADER -->
   <header class="app-header" id="app-header">
     <div class="hd-left">
-      <img src="./icon-192.png" alt="WOD"
-        style="width:34px;height:34px;border-radius:50%;object-fit:cover;
-               border:1.5px solid rgba(212,168,67,0.5);flex-shrink:0;">
+      <img src="./IMG_4074.PNG" alt="WOD"
+        onerror="this.src='./icon-192.png'"
+        style="width:38px;height:38px;border-radius:8px;object-fit:contain;
+               border:1px solid rgba(212,168,67,0.4);flex-shrink:0;background:#0a0f1a;
+               box-shadow:0 0 12px rgba(212,168,67,0.35);
+               filter:drop-shadow(0 0 5px rgba(212,168,67,0.5));">
       <div class="hd-titles">
         <span class="hd-name" id="hd-name">World of Driver</span>
         <span class="hd-sub">Premium</span>
@@ -662,5 +666,6 @@
 
 <script src="app.js"></script>
 <script src="api.js"></script>
+<script src="wod-signature.js"></script>
 </body>
 </html>
