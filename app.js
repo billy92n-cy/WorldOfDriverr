@@ -115,7 +115,7 @@ function updateHeroDate() {
 // ══════════════════════════════════════════════════
 const PAGE_LABELS = {
   home:'Accueil', rush:'Rush', stats:'Stats', docs:'Documents',
-  controle:'Contrôle', pause:'Pause', profil:'Profil'
+  controle:'Contrôle', pause:'Pause', profil:'Profil', muslim:'Muslim'
 };
 
 window.goTo = function(id) {
