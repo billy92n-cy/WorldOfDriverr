@@ -23,11 +23,11 @@ const WOB_CONFIG = {
   // TomTom Traffic — https://developer.tomtom.com (2500 req/jour gratuit)
   TOMTOM_KEY: 'rLeU77arHeM5CXEUmuEF8fN7Up9I9Awk',
 
-  // IDFM PRIM — https://prim.iledefrance-mobilites.fr (votre clé IDF Mobilités)
-  // Remplacez par votre clé PRIM IDF Mobilités (format: ex. "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-  IDFM_KEY: 'nvCfwMmHDiu41GKK6yytwFb53LD1nzl2',   // ← collez ici votre clé IDF Mobilités
+  // IDFM PRIM — https://prim.iledefrance-mobilites.fr
+  // ▶ Collez ici votre clé IDF Mobilités (obtenue sur prim.iledefrance-mobilites.fr)
+  IDFM_KEY: 'VOTRE_CLE_IDFM_PRIM',
 
-  // Navitia legacy (désactivé — clé expirée, remplacé par PRIM IDFM ci-dessus)
+  // Navitia legacy (clé expirée — remplacée par PRIM ci-dessus)
   NAVITIA_KEY: 'tmvRLg8J6MvXpjTFKOuqxwlIJ7oMtFtt',
 
   // Supabase — clés intégrées
@@ -98,7 +98,7 @@ function showToastAPI(msg) { if (typeof showToast === 'function') showToast(msg)
 
 // Vérifier si une clé API est configurée (non placeholder)
 function isKeySet(key) {
-  return key && key.length > 10 && !key.startsWith('VOTRE_') && !key.includes('VOTRE_CLE') && key !== 'undefined' && key !== 'null';
+  return key && key.length > 10 && !key.startsWith('VOTRE_') && !key.startsWith('YOUR_') && key !== 'undefined' && key !== 'null' && key !== '';
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -220,11 +220,18 @@ const CARBURANT = {
     const cached = getCached('wob_carbu', WOB_CONFIG.CACHE_TTL.carbu);
     if (cached) { this.render(cached); return; }
     try {
-      const geoWhere = `distance(geom, geom'POINT(${lon} ${lat})', 8000m) AND prix_valeur > 0`;
+      // FIX: noms de datasets mis à jour + encodage POINT corrigé
+      const geoWhere = `distance(geom, GEOM'POINT(${lon} ${lat})', 8000m) AND prix_valeur > 0`;
+      const idfWhere = `region_name="Ile-de-France" AND prix_valeur > 0`;
       const URLS = [
+        // Dataset v2 flux instantané — format correct
+        'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=' + encodeURIComponent(idfWhere) + '&limit=80&select=adresse,ville,prix_valeur,prix_nom',
+        // Variante avec underscore dans le nom
+        'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix_des_carburants_en_france_flux_instantane_v2/records?where=' + encodeURIComponent(idfWhere) + '&limit=80&select=adresse,ville,prix_valeur,prix_nom',
+        // Fallback géolocalisé
         'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=' + encodeURIComponent(geoWhere) + '&limit=40&select=adresse,ville,prix_valeur,prix_nom',
-        'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix_des_carburants_en_france_flux_instantane_v2/records?where=' + encodeURIComponent(geoWhere) + '&limit=40&select=adresse,ville,prix_valeur,prix_nom',
-        'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=' + encodeURIComponent('prix_valeur > 0') + '&refine=region_name:Ile-de-France&limit=80&select=adresse,ville,prix_valeur,prix_nom',
+        // Fallback: ancien dataset stable
+        'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-carburants-fichier-instantane-test-ods-copie/records?where=' + encodeURIComponent(idfWhere) + '&limit=80&select=adresse,ville,prix_valeur,prix_nom',
       ];
       let data = null;
       for (const url of URLS) {
@@ -601,38 +608,22 @@ const NAVITIA = {
     const cached = getCached('wob_navitia', WOB_CONFIG.CACHE_TTL.navitia);
     if (cached) { this.render(cached); return; }
 
-    // Priorité : PRIM IDF Mobilités (clé fournie par l'utilisateur)
-    const usePRIM = isKeySet(WOB_CONFIG.IDFM_KEY);
-    // Fallback : Navitia legacy si toujours valide
+    const usePRIM    = isKeySet(WOB_CONFIG.IDFM_KEY);
     const useNavitia = !usePRIM && isKeySet(WOB_CONFIG.NAVITIA_KEY);
-
-    if (!usePRIM && !useNavitia) {
-      this.renderNoKey();
-      return;
-    }
+    if (!usePRIM && !useNavitia) { this.renderNoKey(); return; }
 
     try {
       let url, headers;
-
       if (usePRIM) {
-        // PRIM IDF Mobilités — perturbations TC Île-de-France
-        // Doc: https://prim.iledefrance-mobilites.fr/fr/apis/disruptions
+        // PRIM IDF Mobilités — endpoint Navitia compatible
         url = 'https://prim.iledefrance-mobilites.fr/marketplace/navitia/coverage/fr-idf/disruptions?count=50&depth=1';
-        headers = {
-          'apikey': WOB_CONFIG.IDFM_KEY,
-          'Accept': 'application/json',
-        };
+        headers = { 'apikey': WOB_CONFIG.IDFM_KEY, 'Accept': 'application/json' };
       } else {
-        // Navitia legacy fallback
         url = 'https://api.navitia.io/v1/coverage/fr-idf/disruptions?count=50&depth=1';
-        headers = {
-          'Authorization': WOB_CONFIG.NAVITIA_KEY,
-          'Accept': 'application/json',
-        };
+        headers = { 'Authorization': WOB_CONFIG.NAVITIA_KEY, 'Accept': 'application/json' };
       }
-
       const resp = await fetch(url, { signal: AbortSignal.timeout(10000), headers });
-      if (!resp.ok) throw new Error(`PRIM/Navitia HTTP ${resp.status}${resp.status===401||resp.status===403?' — clé invalide ou non autorisée':''}`);
+      if (!resp.ok) throw new Error(`Transport HTTP ${resp.status}${resp.status===401||resp.status===403?' (clé invalide)':''}`);
       const data = await resp.json();
       const disruptions = this.parseDisruptions(data.disruptions || []);
       setCache('wob_navitia', disruptions);
@@ -749,7 +740,7 @@ const NAVITIA = {
       <div class="list-item info" style="border-radius:10px;flex-direction:column;gap:4px;">
         <div style="font-weight:700;">🚇 Alertes Transports en Commun</div>
         <div style="font-size:11px;">
-          Ajoutez votre clé <strong>IDF Mobilités (PRIM)</strong> dans <code>WOB_CONFIG.IDFM_KEY</code> dans <code>api.js</code>.<br>
+          Ajoutez votre clé <strong>IDF Mobilités (PRIM)</strong> dans <code>api.js</code> → <code>IDFM_KEY</code><br>
           Obtenez votre clé gratuite sur <strong>prim.iledefrance-mobilites.fr</strong>
         </div>
       </div>`;
@@ -757,7 +748,7 @@ const NAVITIA = {
 
   renderError() {
     const cont = el('navitia-container'); if (!cont) return;
-    cont.innerHTML = `<div class="list-item warn" style="border-radius:10px;font-size:11px;">🚇 Transports indisponibles — Vérifiez votre clé IDFM PRIM dans api.js → IDFM_KEY</div>`;
+    cont.innerHTML = `<div class="list-item warn" style="border-radius:10px;font-size:11px;">🚇 Service indisponible — Vérifiez votre clé IDFM_KEY dans api.js (prim.iledefrance-mobilites.fr)</div>`;
   },
 };
 
@@ -1120,15 +1111,7 @@ const NOTIFS = {
 // ═══════════════════════════════════════════════════════════════════
 const SUPA = {
   isConfigured() {
-    const key = WOB_CONFIG.SUPABASE_KEY || '';
-    const url = WOB_CONFIG.SUPABASE_URL || '';
-    // Vérifier: la clé anon Supabase est un JWT (commence par "eyJ")
-    // "sb_publishable_" est un format de clé client Supabase JS SDK v2, pas pour l'API REST
-    const isValidKey = key.length > 20 && (key.startsWith('eyJ') || key.startsWith('sb_'));
-    if (key.startsWith('sb_publishable') && !key.startsWith('eyJ')) {
-      console.warn("[WOD] Supabase: cle sb_publishable incompatible avec REST API directe. Utilisez la cle anon public (JWT eyJ...) depuis Settings->API dans votre dashboard Supabase.");
-    }
-    return !!(url.startsWith('https://') && isValidKey);
+    return !!(WOB_CONFIG.SUPABASE_URL?.startsWith('https://') && WOB_CONFIG.SUPABASE_KEY?.length > 10);
   },
   headers() {
     return { 'Content-Type':'application/json', 'apikey':WOB_CONFIG.SUPABASE_KEY, 'Authorization':`Bearer ${WOB_CONFIG.SUPABASE_KEY}` };
