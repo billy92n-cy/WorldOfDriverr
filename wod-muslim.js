@@ -15,7 +15,7 @@ const PRAYER_ICONS = ['🌙','☀️','🌤️','🌅','🌑'];
 
 // ══════════════════════════════════════════════════════════════
 //  ADHAN.JS — Calcul des horaires de prière (implémentation locale)
-//  Méthode Muslim World League (MWL) — angle Fajr 18°, Isha 17°
+//  Méthode UOIF / Grande Mosquée de Paris — Fajr -12°, Isha -12°
 // ══════════════════════════════════════════════════════════════
 const AdhanCalc = (() => {
   const DEG = Math.PI / 180;
@@ -27,60 +27,71 @@ const AdhanCalc = (() => {
     return Math.floor(365.25 * (y + 4716)) + Math.floor(30.6001 * (m + 1)) + d + B - 1524.5;
   }
 
+  // Position solaire : déclinaison (deg) + équation du temps (heures)
   function sunPosition(jd) {
-    const D  = jd - 2451545.0;
-    const g  = (357.529 + 0.98560028 * D) % 360;
-    const q  = (280.459 + 0.98564736 * D) % 360;
-    const L  = (q + 1.915 * Math.sin(g * DEG) + 0.020 * Math.sin(2 * g * DEG)) % 360;
-    const e  = 23.439 - 0.00000036 * D;
-    const RA = Math.atan2(Math.cos(e * DEG) * Math.sin(L * DEG), Math.cos(L * DEG)) / DEG;
-    const d  = Math.asin(Math.sin(e * DEG) * Math.sin(L * DEG)) / DEG;
-    const EqT= q / 15 - ((RA < 0 ? RA + 360 : RA) / 15);
-    return { dec: d, eqt: EqT };
+    const D   = jd - 2451545.0;
+    const g   = ((357.529 + 0.98560028 * D) % 360 + 360) % 360;
+    const q   = ((280.459 + 0.98564736 * D) % 360 + 360) % 360;
+    const L   = ((q + 1.915 * Math.sin(g * DEG) + 0.020 * Math.sin(2 * g * DEG)) % 360 + 360) % 360;
+    const e   = 23.439 - 0.00000036 * D;
+    let RA    = Math.atan2(Math.cos(e * DEG) * Math.sin(L * DEG), Math.cos(L * DEG)) / DEG;
+    RA        = ((RA % 360) + 360) % 360;
+    const dec = Math.asin(Math.sin(e * DEG) * Math.sin(L * DEG)) / DEG;
+    const EqT = (q - RA) / 15; // heures
+    return { dec, eqt: EqT };
   }
 
-  function hourAngle(lat, dec, angle) {
-    const num = Math.cos(angle * DEG) - Math.sin(lat * DEG) * Math.sin(dec * DEG);
-    const den = Math.cos(lat * DEG) * Math.cos(dec * DEG);
-    if (Math.abs(num / den) > 1) return null;
-    return Math.acos(num / den) / DEG;
+  // Angle horaire pour une altitude donnée (deg négatif = sous l'horizon)
+  function hourAngle(lat, dec, altitude) {
+    const cosH = (Math.sin(altitude * DEG) - Math.sin(lat * DEG) * Math.sin(dec * DEG)) /
+                 (Math.cos(lat * DEG) * Math.cos(dec * DEG));
+    if (cosH > 1 || cosH < -1) return null;
+    return Math.acos(cosH) / DEG;
   }
 
-  function asrAngle(lat, dec, shadow) {
-    const target = Math.atan(1 / (shadow + Math.tan(Math.abs(lat - dec) * DEG)));
-    return Math.acos((Math.sin(target) - Math.sin(lat * DEG) * Math.sin(dec * DEG)) /
-           (Math.cos(lat * DEG) * Math.cos(dec * DEG))) / DEG;
+  // Angle horaire Asr (shadowFactor=1 méthode Shafi)
+  function asrHourAngle(lat, dec, shadowFactor) {
+    const a    = Math.atan(1 / (shadowFactor + Math.tan(Math.abs(lat - dec) * DEG)));
+    const cosH = (Math.sin(a) - Math.sin(lat * DEG) * Math.sin(dec * DEG)) /
+                 (Math.cos(lat * DEG) * Math.cos(dec * DEG));
+    if (cosH > 1 || cosH < -1) return null;
+    return Math.acos(cosH) / DEG;
   }
 
-  function toDate(jd, hour) {
-    // hour est en UTC (temps solaire). On crée un Date UTC pur.
-    // toLocaleTimeString applique automatiquement le fuseau local à l'affichage.
-    const d = new Date((jd - 2440587.5 + hour / 24) * 86400000);
-    return d;
+  // Convertit une heure UTC décimale (depuis minuit du jour jd) en objet Date
+  function toDate(jd, hourUTC) {
+    // jd retourné par julianDay finit en .5 → correspond à minuit UTC du jour
+    return new Date((jd - 2440587.5) * 86400000 + hourUTC * 3600000);
   }
 
   return {
-    calculate(lat, lon, date, tz) {
+    /**
+     * Méthode UOIF (Union des Organisations Islamiques de France)
+     * Fajr : -12°, Isha : -12° — recommandé par la Grande Mosquée de Paris
+     * Maghrib : coucher + 3 min de marge
+     */
+    calculate(lat, lon, date) {
       const y = date.getFullYear(), m = date.getMonth() + 1, d = date.getDate();
       const jd = julianDay(y, m, d);
       const { dec, eqt } = sunPosition(jd);
 
-      const noon    = 12 - lon / 15 - eqt;
-      const ha_fajr = hourAngle(lat, dec, -18);
-      const ha_rise = hourAngle(lat, dec, -0.833);
-      const ha_asr  = asrAngle(lat, dec, 1);
-      const ha_sset = hourAngle(lat, dec, -0.833);
-      const ha_isha = hourAngle(lat, dec, -17);
+      // Midi solaire vrai en UTC
+      const noonUTC = 12 - lon / 15 - eqt;
 
-      const times = {
-        Fajr:    ha_fajr ? toDate(jd, noon - ha_fajr / 15) : null,
-        Sunrise: ha_rise ? toDate(jd, noon - ha_rise / 15) : null,
-        Dhuhr:   toDate(jd, noon + 0.05),
-        Asr:     ha_asr  ? toDate(jd, noon + ha_asr / 15)  : null,
-        Maghrib: ha_sset ? toDate(jd, noon + ha_sset / 15) : null,
-        Isha:    ha_isha ? toDate(jd, noon + ha_isha / 15) : null,
+      const haFajr   = hourAngle(lat, dec, -12);     // UOIF : Fajr à -12°
+      const haRise   = hourAngle(lat, dec, -0.833);  // Lever (réfraction standard)
+      const haAsr    = asrHourAngle(lat, dec, 1);    // Asr Shafi
+      const haSunset = hourAngle(lat, dec, -0.833);  // Coucher
+      const haIsha   = hourAngle(lat, dec, -12);     // UOIF : Isha à -12°
+
+      return {
+        Fajr:    haFajr   != null ? toDate(jd, noonUTC - haFajr   / 15)        : null,
+        Sunrise: haRise   != null ? toDate(jd, noonUTC - haRise   / 15)        : null,
+        Dhuhr:   toDate(jd, noonUTC + (3 / 60)),                               // +3 min après midi solaire
+        Asr:     haAsr    != null ? toDate(jd, noonUTC + haAsr    / 15)        : null,
+        Maghrib: haSunset != null ? toDate(jd, noonUTC + haSunset / 15 + (3 / 60)) : null, // +3 min après coucher
+        Isha:    haIsha   != null ? toDate(jd, noonUTC + haIsha   / 15)        : null,
       };
-      return times;
     }
   };
 })();
@@ -756,7 +767,7 @@ const PRAYERS = {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           Activer les rappels
         </button>
-        <div class="prayer-method-lbl">Méthode Muslim World League · Paris</div>
+        <div class="prayer-method-lbl">Méthode UOIF · Grande Mosquée de Paris</div>
       </div>
     `;
     scroll.appendChild(card);
