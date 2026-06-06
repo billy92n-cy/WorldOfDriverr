@@ -115,7 +115,7 @@ function updateHeroDate() {
 // ══════════════════════════════════════════════════
 const PAGE_LABELS = {
   home:'Accueil', rush:'Rush', stats:'Stats', docs:'Documents',
-  controle:'Contrôle', pause:'Pause', profil:'Profil', muslim:'Muslim'
+  controle:'Contrôle', pause:'Pause', profil:'Profil'
 };
 
 window.goTo = function(id) {
@@ -2389,35 +2389,100 @@ const HOME = {
     const hourly   = totalMin > 0 ? (total / totalMin) * 60 : 0;
     const ratioKm  = totalKm > 0 ? total / totalKm : 0;
 
-    // Répartition horaire
-    const hourDist = {};
+    // ── Analyse avancée des courses ──────────────────
+    // Répartition par plateforme (si dispo)
+    const platDist = {};
+    trips.forEach(t => {
+      const p = t.platform || 'Inconnue';
+      if (!platDist[p]) platDist[p] = { count: 0, gain: 0, km: 0 };
+      platDist[p].count++;
+      platDist[p].gain += t.gain;
+      platDist[p].km   += t.km || 0;
+    });
+    const platSummary = Object.entries(platDist)
+      .map(([p, d]) => `${p}: ${d.count} courses, moy ${(d.gain/d.count).toFixed(2)}€, ratio ${d.km>0?(d.gain/d.km).toFixed(2):'-'}€/km`)
+      .join(' | ');
+
+    // Courses refusables : gain < 8€ OU ratio < 1.5€/km OU durée > 45min pour gain < 20€
+    const lowValue   = trips.filter(t => t.gain < 8).length;
+    const lowRatio   = trips.filter(t => t.km > 0 && t.gain / t.km < 1.5).length;
+    const longCheap  = trips.filter(t => (t.duree || 0) > 45 && t.gain < 20).length;
+
+    // Courses premium : > 30€
+    const premium    = trips.filter(t => t.gain >= 30).length;
+    const premiumPct = ((premium / trips.length) * 100).toFixed(0);
+
+    // Créneau le plus rentable (€/course moyen par tranche horaire)
+    const hourRevenue = {};
     trips.forEach(t => {
       if (!t.date) return;
       const h = new Date(t.date).getHours();
-      const bracket = h < 6 ? 'nuit (0-6h)' : h < 10 ? 'matin (6-10h)' : h < 14 ? 'midi (10-14h)' : h < 18 ? 'après-midi (14-18h)' : h < 22 ? 'soir (18-22h)' : 'soirée (22-0h)';
-      hourDist[bracket] = (hourDist[bracket] || 0) + 1;
+      const bracket = h < 6 ? 'nuit (0-6h)' : h < 10 ? 'matin (6-10h)' : h < 14 ? 'midi (10-14h)' : h < 18 ? 'après-midi (14-18h)' : h < 22 ? 'soir (18-22h)' : 'soirée tardive (22-0h)';
+      if (!hourRevenue[bracket]) hourRevenue[bracket] = { total: 0, count: 0 };
+      hourRevenue[bracket].total += t.gain;
+      hourRevenue[bracket].count++;
     });
-    const bestHour = Object.entries(hourDist).sort((a,b) => b[1]-a[1])[0];
+    const bestSlot = Object.entries(hourRevenue)
+      .map(([b, d]) => ({ bracket: b, avg: d.total / d.count, count: d.count }))
+      .sort((a, b) => b.avg - a.avg)[0];
+    const worstSlot = Object.entries(hourRevenue)
+      .map(([b, d]) => ({ bracket: b, avg: d.total / d.count, count: d.count }))
+      .sort((a, b) => a.avg - b.avg)[0];
 
-    // Courses sous-performantes (< 80% de la moyenne)
-    const lowPerf = trips.filter(t => t.km > 0 && t.gain / t.km < ratioKm * 0.8).length;
+    // Jour de semaine le plus rentable
+    const dayNames = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
+    const dayRevenue = {};
+    trips.forEach(t => {
+      if (!t.date) return;
+      const day = dayNames[new Date(t.date).getDay()];
+      if (!dayRevenue[day]) dayRevenue[day] = { total: 0, count: 0 };
+      dayRevenue[day].total += t.gain;
+      dayRevenue[day].count++;
+    });
+    const bestDay = Object.entries(dayRevenue)
+      .map(([d, v]) => ({ day: d, avg: v.total / v.count }))
+      .sort((a, b) => b.avg - a.avg)[0];
 
-    const prompt = `Tu es un coach expert VTC parisien. Analyse ces données de courses et fournis des conseils CONCRETS, ENGAGEANTS et PROFESSIONNELS en 4-6 phrases max. Sois direct, actionnable, motivant.
+    // Durée moyenne des courses
+    const tripsWithDuration = trips.filter(t => t.duree > 0);
+    const avgDuration = tripsWithDuration.length > 0
+      ? tripsWithDuration.reduce((s, t) => s + t.duree, 0) / tripsWithDuration.length
+      : 0;
 
-DONNÉES CHAUFFEUR (${trips.length} courses enregistrées) :
-- Gains bruts : ${total.toFixed(2)}€
-- Moyenne/course : ${avg.toFixed(2)}€ (meilleure: ${best.toFixed(2)}€, plus faible: ${worst.toFixed(2)}€)
-- Distance totale : ${totalKm.toFixed(0)} km
-- Ratio : ${ratioKm.toFixed(2)} €/km
-- Taux horaire : ${hourly.toFixed(2)} €/h
-- Carburant estimé : ${fuelCost.toFixed(2)}€ · Bénéfice net : ${net.toFixed(2)}€
-- Véhicule : ${vehType}
-- Meilleur créneau : ${bestHour ? `${bestHour[0]} (${bestHour[1]} courses)` : 'non défini'}
-- Courses sous-performantes (< 2,5€/km) : ${lowPerf}/${trips.length}
+    const prompt = `Tu es un expert VTC parisien spécialisé dans l'optimisation des revenus chauffeur. Ton rôle est d'analyser les données de courses réelles et de donner des conseils TRÈS CONCRETS et ACTIONNABLES pour aider le chauffeur à mieux choisir ses courses et maximiser ses gains nets.
 
-OBJECTIFS PROFIL : journalier ${state.goals?.day || 0}€, hebdo ${state.goals?.week || 0}€
+═══ DONNÉES RÉELLES DU CHAUFFEUR (${trips.length} courses) ═══
 
-Fournis : 1 constat clé sur les performances, 2 actions immédiates pour optimiser les revenus (créneaux, zones, type de courses), 1 conseil sur l'efficacité carburant.`;
+PERFORMANCE GLOBALE :
+• Gains bruts : ${total.toFixed(2)}€ | Net après carburant : ${net.toFixed(2)}€
+• Moyenne/course : ${avg.toFixed(2)}€ | Meilleure : ${best.toFixed(2)}€ | Plus faible : ${worst.toFixed(2)}€
+• Distance totale : ${totalKm.toFixed(0)} km | Ratio moyen : ${ratioKm.toFixed(2)} €/km
+• Taux horaire : ${hourly.toFixed(2)} €/h | Durée moy/course : ${avgDuration.toFixed(0)} min
+• Carburant (${vehType}, ${conso}L/100km à ${pCarb}€/L) : ${fuelCost.toFixed(2)}€
+
+QUALITÉ DU PORTEFEUILLE DE COURSES :
+• Courses premium (≥30€) : ${premium}/${trips.length} (${premiumPct}%)
+• Courses peu rentables (<8€) : ${lowValue}/${trips.length}
+• Mauvais ratio (<1,5€/km) : ${lowRatio}/${trips.length}
+• Longues et bon marché (>45min, <20€) : ${longCheap}/${trips.length}
+
+CRÉNEAUX HORAIRES :
+• Meilleur créneau : ${bestSlot ? `${bestSlot.bracket} → moy ${bestSlot.avg.toFixed(2)}€/course (${bestSlot.count} courses)` : 'pas assez de données'}
+• Créneau le moins rentable : ${worstSlot ? `${worstSlot.bracket} → moy ${worstSlot.avg.toFixed(2)}€/course` : '-'}
+• Meilleur jour : ${bestDay ? `${bestDay.day} → moy ${bestDay.avg.toFixed(2)}€/course` : 'pas assez de données'}
+
+PLATEFORMES : ${platSummary || 'non renseigné'}
+
+OBJECTIFS : journalier ${state.goals?.day || 0}€ | hebdo ${state.goals?.week || 0}€ | mensuel ${state.goals?.month || 0}€
+
+═══ TA MISSION ═══
+En te basant UNIQUEMENT sur ces données réelles, donne :
+1. 🎯 UN CONSTAT PRÉCIS sur le point le plus critique (ex: trop de courses courtes peu rentables, mauvais créneaux, ratio €/km insuffisant...)
+2. ✅ DEUX RÈGLES CONCRÈTES à appliquer IMMÉDIATEMENT pour mieux choisir les courses (ex: refuser les courses X, privilégier Y, quitter la zone Z à telle heure...)
+3. 💡 UN CONSEIL sur le meilleur créneau/jour à exploiter selon ses données
+4. ⚡ UNE ACTION pour améliorer le taux horaire
+
+Sois direct, chiffré, sans blabla. Parle comme un expert VTC, pas comme un chatbot générique. Max 6 phrases.`;
 
     try {
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -2435,14 +2500,27 @@ Fournis : 1 constat clé sur les performances, 2 actions immédiates pour optimi
       iaEl.textContent = text;
       setLS('wob_ia', text);
     } catch {
-      // Fallback local engageant
-      let txt = `📊 ${trips.length} courses · ${total.toFixed(2)}€ bruts · moyenne ${avg.toFixed(2)}€/course.`;
-      if (hourly < 12) txt += ` ⚠️ Taux horaire faible (${hourly.toFixed(1)}€/h) — privilégiez les courses CDG/Orly (15-30€) aux courtes distances.`;
-      else txt += ` ✅ Bon taux horaire (${hourly.toFixed(1)}€/h) — continuez sur cette lancée !`;
-      if (lowPerf > trips.length * 0.3) txt += ` 🎯 ${lowPerf} courses sous 2,5€/km détectées — refusez les courses < 8€ en heures creuses.`;
-      if (bestHour) txt += ` 🕐 Votre meilleur créneau : ${bestHour[0]} — concentrez-vous sur ces heures.`;
-      iaEl.textContent = txt;
-      setLS('wob_ia', txt);
+      // Fallback local — analyse VTC sans API
+      const lines = [];
+      // Constat principal
+      if (lowRatio > trips.length * 0.3)
+        lines.push(`🎯 ${lowRatio} courses sur ${trips.length} sont sous 1,5€/km — c'est trop. Refusez systématiquement les courses < 8€ qui vous font perdre du temps moteur.`);
+      else if (hourly < 15)
+        lines.push(`⚠️ Taux horaire de ${hourly.toFixed(1)}€/h — insuffisant pour couvrir vos charges. Ciblez les courses aéroport (CDG/Orly) qui tournent entre 45€ et 80€.`);
+      else
+        lines.push(`✅ Bon taux horaire (${hourly.toFixed(1)}€/h) sur ${trips.length} courses — vous êtes dans la bonne dynamique.`);
+      // Conseil créneau
+      if (bestSlot && worstSlot && bestSlot.bracket !== worstSlot.bracket)
+        lines.push(`🕐 Votre créneau le plus rentable est ${bestSlot.bracket} (${bestSlot.avg.toFixed(2)}€/course moy) — concentrez-vous dessus et évitez ${worstSlot.bracket} (${worstSlot.avg.toFixed(2)}€/course).`);
+      // Courses premium
+      if (premium === 0)
+        lines.push(`💡 Aucune course ≥30€ détectée — activez la file d'attente CDG/Orly et les adresses affaires (La Défense, hôtels 4-5★) pour muscler votre panier moyen.`);
+      else
+        lines.push(`💡 ${premiumPct}% de courses premium (≥30€) — continuez à privilégier ces destinations.`);
+      // Carburant
+      lines.push(`⛽ Carburant : ${fuelCost.toFixed(2)}€ sur ${totalKm.toFixed(0)} km — ratio net ${ratioKm > 0 ? (net / totalKm).toFixed(2) : '—'}€/km réel. ${ratioKm < 1.8 ? 'Réduisez les km à vide en restant dans les zones demande forte.' : 'Bonne maîtrise du kilométrage.'}`);
+      iaEl.textContent = lines.join(' ');
+      setLS('wob_ia', iaEl.textContent);
     } finally {
       dotEl?.classList.remove('active');
       // Projections
