@@ -394,25 +394,18 @@ function injectSignatureStyles() {
       isolation: isolate;
     }
 
-    /* Pseudo-élément LED border sweep autour du carré icône */
+    /* Pseudo-élément LED border — statique, pas d'animation de rotation */
     .fab-item-ico::before {
       content: '';
       position: absolute;
       inset: -2px;
       border-radius: 15px;
-      background: conic-gradient(
-        from var(--led-angle, 0deg),
-        transparent 0deg,
-        rgba(212,168,67,0.0) 60deg,
-        rgba(245,194,87,0.9) 120deg,
-        rgba(255,255,220,1)  150deg,
-        rgba(245,194,87,0.9) 180deg,
-        rgba(212,168,67,0.0) 240deg,
-        transparent 360deg
-      );
-      animation: ledSweep 2.8s linear infinite;
+      background: transparent;
+      border: 1.5px solid rgba(212,168,67,0.35);
+      box-shadow: 0 0 6px rgba(212,168,67,0.2);
       z-index: 0;
       pointer-events: none;
+      /* animation: ledSweep désactivée */
     }
 
     /* Masque pour n'afficher que le contour */
@@ -450,15 +443,9 @@ function injectSignatureStyles() {
       box-shadow: 0 0 24px rgba(212,168,67,0.7), inset 0 0 8px rgba(212,168,67,0.15) !important;
     }
 
-    /* Stagger des animations LED par item */
-    .fab-item:nth-child(1) .fab-item-ico::before { animation-delay: 0s;     }
-    .fab-item:nth-child(2) .fab-item-ico::before { animation-delay: -0.35s; }
-    .fab-item:nth-child(3) .fab-item-ico::before { animation-delay: -0.70s; }
-    .fab-item:nth-child(4) .fab-item-ico::before { animation-delay: -1.05s; }
-    .fab-item:nth-child(5) .fab-item-ico::before { animation-delay: -1.40s; }
-    .fab-item:nth-child(6) .fab-item-ico::before { animation-delay: -1.75s; }
-    .fab-item:nth-child(7) .fab-item-ico::before { animation-delay: -2.10s; }
-    .fab-item:nth-child(8) .fab-item-ico::before { animation-delay: -2.45s; }
+    /* Stagger LED désactivé */
+
+    /* Support @property conservé pour compatibilité future */
 
     /* Support @property pour conic-gradient animé (Chrome/Edge) */
     @property --led-angle {
@@ -467,17 +454,13 @@ function injectSignatureStyles() {
       inherits: false;
     }
 
-    /* Fallback Firefox — animation opacity pulsée */
+    /* Fallback Firefox — border statique */
     @supports not (background: conic-gradient(from 0deg, red, blue)) {
       .fab-item-ico::before {
         background: none;
-        border: 1.5px solid rgba(212,168,67,0.6);
-        animation: ledFallback 2.2s ease-in-out infinite;
+        border: 1.5px solid rgba(212,168,67,0.35);
       }
-      @keyframes ledFallback {
-        0%,100% { opacity:0.3; box-shadow: 0 0 4px rgba(212,168,67,0.3); }
-        50%      { opacity:1;   box-shadow: 0 0 12px rgba(212,168,67,0.8); }
-      }
+    }
     }
 
     /* Neon border sweep on active fab-item (outer) */

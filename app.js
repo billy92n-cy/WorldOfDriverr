@@ -392,9 +392,23 @@ async function handleCSV(e) {
     res.weekdays.forEach((v,i) => { wd[i] += v; });
     state.sessions.push(...res.sessions);
     saved.push(file.name);
+
+    // Stocker les données mensuelles par fichier
+    const monthly = JSON.parse(ls('wob_monthly') || '[]');
+    monthly.push({
+      file: file.name,
+      platform: plat,
+      month: res.detectedMonth,   // ex: "Avril 2026"
+      gain: res.gain,
+      km: res.km,
+      trips: res.trips,
+    });
+    setLS('wob_monthly', JSON.stringify(monthly));
+
     const li = document.createElement('div');
     li.className = 'list-item ok';
-    li.innerHTML = `${svgCheck()} ${file.name} — ${res.trips} courses · ${res.gain.toFixed(2)}€`;
+    const mLabel = res.detectedMonth ? ` · ${res.detectedMonth}` : '';
+    li.innerHTML = `${svgCheck()} ${file.name}${mLabel} — ${res.trips} courses · ${res.gain.toFixed(2)}€`;
     $('csv-files-list')?.appendChild(li);
   }
 
@@ -422,14 +436,15 @@ function parseCSV(file) {
         const hours   = new Array(24).fill(0);
         const weekdays= new Array(7).fill(0);
         const sessions= [];
-        // Colonnes prix TTC (priorité absolue à Prix TTC pour Bolt)
         const GC = ['Prix TTC','Fare','Total','Earnings','Amount','Montant','Prix','Revenue','Gain'];
         const KC = ['Distance (km)','Distance','Trip Distance','Kilometers','km','distance_km'];
-        // Colonnes date — Bolt utilise "Date du trajet" ou "Date"
         const DC = ['Date du trajet','Date','date','datetime','pickup_datetime','heure','Heure','Pickup time'];
+
+        // Pour détecter le mois dominant du fichier
+        const monthCount = {};
+
         rows.forEach(row => {
           let g=0, k=0;
-          // Chercher le prix TTC en nettoyant les valeurs string
           for (const c of GC) {
             if (row[c] !== undefined && row[c] !== null && row[c] !== '') {
               const v = parseFloat(String(row[c]).replace(',','.').replace(/[^\d.]/g,''));
@@ -444,12 +459,10 @@ function parseCSV(file) {
           }
           if (g > 0) {
             gain += g; km += k; trips++;
-            // Parser les dates Bolt format "DD.MM.YYYY HH:MM"
             for (const c of DC) {
               if (row[c]) {
                 let d;
                 const raw = String(row[c]).trim();
-                // Format Bolt: "30.04.2026 21:01"
                 const boltMatch = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
                 if (boltMatch) {
                   d = new Date(`${boltMatch[3]}-${boltMatch[2]}-${boltMatch[1]}T${boltMatch[4]}:${boltMatch[5]}:00`);
@@ -460,6 +473,9 @@ function parseCSV(file) {
                   hours[d.getHours()] += g;
                   weekdays[d.getDay()] += g;
                   sessions.push({ gain: g, km: k, date: d.toISOString() });
+                  // Compter les mois présents dans le fichier
+                  const mKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+                  monthCount[mKey] = (monthCount[mKey] || 0) + 1;
                   break;
                 }
               }
@@ -469,9 +485,28 @@ function parseCSV(file) {
             }
           }
         });
-        resolve({ gain, km, trips, hours, weekdays, sessions });
+
+        // Détecter le mois dominant (le plus représenté dans le fichier)
+        let detectedMonth = null;
+        const MONTHS_FR = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+        if (Object.keys(monthCount).length > 0) {
+          const dominant = Object.entries(monthCount).sort((a,b) => b[1]-a[1])[0][0];
+          const [yr, mo] = dominant.split('-');
+          detectedMonth = `${MONTHS_FR[parseInt(mo)-1]} ${yr}`;
+        } else {
+          // Fallback : détecter depuis le nom du fichier
+          const fname = file.name.toLowerCase();
+          const mMatch = fname.match(/(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)/i);
+          const yMatch = fname.match(/20\d{2}/);
+          if (mMatch) {
+            const mIdx = MONTHS_FR.findIndex(m => m.toLowerCase() === mMatch[1].toLowerCase());
+            detectedMonth = `${MONTHS_FR[mIdx >= 0 ? mIdx : 0]} ${yMatch ? yMatch[0] : new Date().getFullYear()}`;
+          }
+        }
+
+        resolve({ gain, km, trips, hours, weekdays, sessions, detectedMonth });
       },
-      error: () => resolve({ gain:0, km:0, trips:0, hours:new Array(24).fill(0), weekdays:new Array(7).fill(0), sessions:[] })
+      error: () => resolve({ gain:0, km:0, trips:0, hours:new Array(24).fill(0), weekdays:new Array(7).fill(0), sessions:[], detectedMonth:null })
     });
   });
 }
@@ -599,20 +634,37 @@ window.generateIAReport = async function() {
   const ratio   = state.totalKm > 0 ? net/state.totalKm : 0;
   const avg     = state.totalTrips > 0 ? state.totalGain/state.totalTrips : 0;
 
+  // Récupérer les données mensuelles pour contexte précis
+  const monthly = JSON.parse(ls('wob_monthly') || '[]');
+  const nbMonths = monthly.length;
+
+  // Construire le résumé mensuel pour le prompt
+  let monthlyContext = '';
+  if (nbMonths > 0) {
+    monthlyContext = monthly.map(m =>
+      `  • ${m.month || m.file} (${m.platform}) : ${m.gain.toFixed(2)}€ bruts · ${m.trips} courses · ${m.km.toFixed(0)} km`
+    ).join('\n');
+  }
+
   const prompt = `Tu es un assistant expert VTC. Analyse ces données de chauffeur et génère un rapport concis en 3-4 phrases en français avec des conseils actionnables.
 
-Données:
-- Gains bruts: ${state.totalGain.toFixed(2)}€
-- Distance: ${state.totalKm.toFixed(1)} km
-- Courses: ${state.totalTrips}
-- Carburant: ${fuel.toFixed(2)}€
-- Dépenses (repas, lavage, etc.): ${totalDep.toFixed(2)}€
-- Bénéfice net réel: ${net.toFixed(2)}€
-- Ratio: ${ratio.toFixed(2)}€/km
-- Moyenne/course: ${avg.toFixed(2)}€
-- Type véhicule: ${ls('wob_veh_type') || 'essence'}
+RÈGLE IMPORTANTE : Chaque fichier CSV importé représente UN SEUL mois complet d'activité (pas une année). Les gains mensuels ci-dessous sont les revenus de chaque mois séparé. Ne jamais les interpréter comme des données annuelles.
 
-Fournis: analyse de rentabilité, points forts/faibles, 2 conseils concrets pour améliorer le ratio.`;
+Détail par mois importé (${nbMonths} mois) :
+${monthlyContext || '  • Données sans mois détecté'}
+
+Totaux cumulés sur ${nbMonths} mois :
+- Gains bruts cumulés : ${state.totalGain.toFixed(2)}€
+- Distance cumulée : ${state.totalKm.toFixed(1)} km
+- Courses cumulées : ${state.totalTrips}
+- Carburant estimé : ${fuel.toFixed(2)}€
+- Dépenses pro : ${totalDep.toFixed(2)}€
+- Bénéfice net : ${net.toFixed(2)}€
+- Ratio net/km : ${ratio.toFixed(2)}€/km
+- Moyenne par course : ${avg.toFixed(2)}€
+- Type véhicule : ${ls('wob_veh_type') || 'essence'}
+
+Fournis : analyse de rentabilité mensuelle, comparaison entre les mois si plusieurs, points forts/faibles, 2 conseils concrets.`;
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -635,7 +687,8 @@ Fournis: analyse de rentabilité, points forts/faibles, 2 conseils concrets pour
     else if (ratio >= 0.5) { emoji=''; analyse='Bonne performance'; conseil='Privilégiez vendredi/samedi soir.'; }
     else if (ratio >= 0.3) { emoji=''; analyse='Performance correcte'; conseil='Réduisez les km à vide.'; }
     else                   { emoji=''; analyse='Rentabilité à améliorer'; conseil='Ciblez CDG/Orly pour de longues courses.'; }
-    const txt = `${emoji} ${analyse} — Net : ${net.toFixed(2)}€ · ${ratio.toFixed(2)}€/km. ${conseil}`;
+    const mLabel = nbMonths > 0 ? ` (${nbMonths} mois)` : '';
+    const txt = `${emoji} ${analyse}${mLabel} — Net : ${net.toFixed(2)}€ · ${ratio.toFixed(2)}€/km. ${conseil}`;
     iaEl.textContent = txt;
     setLS('wob_ia', txt);
   } finally {
@@ -1877,7 +1930,7 @@ window.saveStatus = function(plat, val2) { setLS(`wob_status_${plat}`, val2); };
 // ══════════════════════════════════════════════════
 window.clearCSV = function() {
   if (!confirm('Effacer toutes les données CSV importées ?')) return;
-  ['wob_gain','wob_km','wob_trips','wob_sessions','wob_platforms','wob_hours','wob_weekday','wob_files','wob_ia']
+  ['wob_gain','wob_km','wob_trips','wob_sessions','wob_platforms','wob_hours','wob_weekday','wob_files','wob_ia','wob_monthly']
     .forEach(k => localStorage.removeItem(k));
   state.totalGain=0; state.totalKm=0; state.totalTrips=0;
   state.sessions=[]; state.platformData={}; state.hourData=new Array(24).fill(0); state.weekdayData=new Array(7).fill(0);
