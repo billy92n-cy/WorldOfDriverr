@@ -836,14 +836,21 @@ window.loadTraffic = async function() {
   IDF_ZONES.forEach((z,i) => {
     const r = results[i];
     if (r) {
+      const hasTomTom = r.source === 'tomtom';
+      const delayBadge = (hasTomTom && r.delayMin > 2)
+        ? `<span style="font-size:.65rem;color:#ff4d6a;font-weight:700;">+${r.delayMin}min 🚦</span>`
+        : '';
+      const srcBadge = hasTomTom
+        ? `<span style="font-size:.6rem;color:var(--gold);opacity:.7;">● TomTom live</span>`
+        : `<span style="font-size:.6rem;color:var(--text-dim);opacity:.6;">○ estimé</span>`;
       html += `<div class="list-item ${r.cls}" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <div>
-          <div style="font-weight:700;font-size:.82rem">${z.nom}</div>
+          <div style="font-weight:700;font-size:.82rem">${z.nom} ${srcBadge}</div>
           <div style="font-size:.7rem;opacity:.8">${r.congestion}</div>
           ${r.tip ? `<div style="font-size:.68rem;color:var(--gold)">${r.tip}</div>` : ''}
         </div>
         <div style="text-align:right;font-weight:700;white-space:nowrap">
-          <div>${r.mins} min</div>
+          <div>${r.mins} min ${delayBadge}</div>
           <div style="font-size:.72rem;opacity:.8">${r.km} km</div>
         </div>
       </div>`;
@@ -856,7 +863,66 @@ window.loadTraffic = async function() {
   window._trafficTimer = setTimeout(loadTraffic, 5*60*1000);
 };
 
+// ── Clé TomTom partagée avec api.js (injectée directement) ──
+const _TOMTOM_KEY = 'rLeU77arHeM5CXEUmuEF8fN7Up9I9Awk';
+
 async function fetchRoute(zone) {
+  // Essai 1 : TomTom Routing API avec trafic temps réel (embouteillages inclus)
+  try {
+    const from = `${state.pos.lat},${state.pos.lon}`;
+    const to   = `${zone.lat},${zone.lon}`;
+    const cacheKey = `wod_rt_${from}_${to}`.replace(/[,.]/g,'_');
+    // Cache 10 min pour le widget principal (plus frais que api.js qui cache 20min)
+    const cached = (() => {
+      try {
+        const v = localStorage.getItem(cacheKey);
+        const ts = parseInt(localStorage.getItem(cacheKey+'_ts')||'0');
+        if (v && Date.now()-ts < 10*60*1000) return JSON.parse(v);
+      } catch(e){}
+      return null;
+    })();
+    if (cached) return cached;
+
+    const url = `https://api.tomtom.com/routing/1/calculateRoute/${from}:${to}/json`
+      + `?traffic=true&travelMode=car&routeType=fastest&key=${_TOMTOM_KEY}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(9000) });
+    if (!resp.ok) throw new Error(`TomTom HTTP ${resp.status}`);
+    const data = await resp.json();
+    const summary = data.routes?.[0]?.legs?.[0]?.summary;
+    if (!summary) throw new Error('Pas de route TomTom');
+
+    const travelSec       = summary.travelTimeInSeconds;
+    const noTrafficSec    = summary.noTrafficTravelTimeInSeconds || travelSec;
+    const historicSec     = summary.historicTrafficTravelTimeInSeconds || noTrafficSec;
+    const distM           = summary.lengthInMeters;
+    const mins            = Math.round(travelSec / 60);
+    const minsNoTraffic   = Math.round(noTrafficSec / 60);
+    const delayMin        = Math.max(0, mins - minsNoTraffic);
+    const km              = (distM / 1000).toFixed(1);
+    // Indice de congestion basé sur le délai relatif
+    const delayRatio = noTrafficSec > 0 ? travelSec / noTrafficSec : 1;
+    let congestion, cls;
+    if (delayRatio < 1.10)      { congestion='🟢 Fluide';        cls='ok'; }
+    else if (delayRatio < 1.30) { congestion='🟡 Modéré';        cls='info'; }
+    else if (delayRatio < 1.60) { congestion=`🟠 Chargé (+${delayMin}min)`; cls='warn'; }
+    else                        { congestion=`🔴 Embouteillages (+${delayMin}min)`; cls='danger'; }
+
+    let tip='';
+    if (zone.nom.includes('CDG')||zone.nom.includes('Orly')) tip='Courses longues rentables';
+    else if (zone.nom.includes('Défense')) tip='Clientèle affaires';
+
+    const result = { mins, minsNoTraffic, delayMin, km, congestion, cls, tip, source:'tomtom' };
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(result));
+      localStorage.setItem(cacheKey+'_ts', Date.now().toString());
+    } catch(e){}
+    return result;
+
+  } catch(e) {
+    console.warn('[fetchRoute TomTom]', zone.nom, e.message, '→ fallback OSRM');
+  }
+
+  // Fallback : OSRM (sans données trafic — estimation distance/vitesse)
   try {
     const url = `https://router.project-osrm.org/route/v1/driving/${state.pos.lon},${state.pos.lat};${zone.lon},${zone.lat}?overview=false`;
     const resp = await fetch(url, { signal:AbortSignal.timeout(7000) });
@@ -867,14 +933,14 @@ async function fetchRoute(zone) {
     if (!dur||!dist) return null;
     const mins=Math.round(dur/60), km=(dist/1000).toFixed(1), speed=(dist/1000)/(dur/3600);
     let congestion, cls;
-    if (speed>50)      { congestion='Fluide';       cls='ok'; }
-    else if (speed>30) { congestion='Modéré';       cls='info'; }
-    else if (speed>15) { congestion='Chargé';       cls='warn'; }
-    else               { congestion='Congestionné'; cls='danger'; }
+    if (speed>50)      { congestion='Fluide (estimé)';       cls='ok'; }
+    else if (speed>30) { congestion='Modéré (estimé)';       cls='info'; }
+    else if (speed>15) { congestion='Chargé (estimé)';       cls='warn'; }
+    else               { congestion='Congestionné (estimé)'; cls='danger'; }
     let tip='';
     if (zone.nom.includes('CDG')||zone.nom.includes('Orly')) tip='Courses longues rentables';
     else if (zone.nom.includes('Défense')) tip='Clientèle affaires';
-    return { mins, km, congestion, cls, tip };
+    return { mins, km, congestion, cls, tip, source:'osrm' };
   } catch { return null; }
 }
 

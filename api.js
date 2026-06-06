@@ -21,10 +21,10 @@
 // ─────────────────────────────────────────────────────────────────
 const WOB_CONFIG = {
   // TomTom Traffic — https://developer.tomtom.com (2500 req/jour gratuit)
-  TOMTOM_KEY: 'VOTRE_CLE_TOMTOM_ICI',
+  TOMTOM_KEY: 'rLeU77arHeM5CXEUmuEF8fN7Up9I9Awk',
 
   // Navitia — https://navitia.io (gratuit sur inscription)
-  NAVITIA_KEY: 'VOTRE_CLE_NAVITIA_ICI',
+  NAVITIA_KEY: 'tmvRLg8J6MvXpjTFKOuqxwlIJ7oMtFtt',
 
   // Supabase — clés intégrées
   SUPABASE_URL: 'https://ewdbcvygplepjefmpyap.supabase.co',
