@@ -83,9 +83,10 @@ window.playAppleSound = () => WOD_SOUND.click();
 const WOD_IMG = {
   // Chemins à tester dans l'ordre
   candidates: [
+    './wod-logo-text.png',
+    './IMG_4076.PNG',
     './IMG_4074.PNG',
     './IMG_4074.png',
-    './img_4074.png',
     './logo.png',
     './icon-512.png',
     './icon-192.png',
@@ -110,22 +111,56 @@ const WOD_IMG = {
     return this.fallbackSVG;
   },
 
-  async applyToAll() {
-    const src = await this.resolve();
-    const ids = [
-      'splash-logo-img',
-      'fab-logo-img',
-      'hd-wod-logo',
-      'notif-wod-logo',
-      'dhikr-celebration-logo',
+  // Separate icon (no text) from text logo
+  async resolveIcon() {
+    // Icon = WD logo without text = IMG_4076
+    const iconCandidates = [
+      './wod-logo-icon.png',
+      './IMG_4076.PNG',
+      './icon-512.png',
+      './icon-192.png',
     ];
-    ids.forEach(id => {
+    for (const src of iconCandidates) {
+      const ok = await new Promise(res => {
+        const img = new Image();
+        img.onload = () => res(true);
+        img.onerror = () => res(false);
+        img.src = src;
+      });
+      if (ok) return src;
+    }
+    return this.fallbackSVG;
+  },
+
+  async applyToAll() {
+    const splashSrc = await this.resolve();       // logo with text → splash
+    const iconSrc   = await this.resolveIcon();   // icon only → FAB + header
+
+    // Splash: full logo with text
+    const splashEl = document.getElementById('splash-logo-img');
+    if (splashEl) { splashEl.src = splashSrc; splashEl.style.objectFit = 'contain'; }
+
+    // FAB: icon only
+    const fabEl = document.getElementById('fab-logo-img');
+    if (fabEl) { fabEl.src = iconSrc; }
+
+    // Header: icon only
+    const hdEl = document.getElementById('hd-wod-logo');
+    if (hdEl) { hdEl.src = iconSrc; }
+
+    // Data attrs: icon
+    document.querySelectorAll('[data-wod-icon]').forEach(el => { el.src = iconSrc; });
+
+    // Data attrs: text logo
+    document.querySelectorAll('[data-wod-logo]').forEach(el => { el.src = splashSrc; });
+
+    // Specific ids that use text logo
+    ['notif-wod-logo','dhikr-celebration-logo'].forEach(id => {
       const el = document.getElementById(id);
-      if (el) el.src = src;
+      if (el) el.src = iconSrc; // use icon for small contexts
     });
-    // Also any img with data-wod-logo attr
-    document.querySelectorAll('[data-wod-logo]').forEach(el => { el.src = src; });
-    return src;
+
+    return splashSrc;
   },
 };
 
@@ -150,16 +185,39 @@ function injectSignatureStyles() {
        FAB BUTTON — logo sans le "+"
     ══════════════════════════════════ */
     .fab-plus { display: none !important; }
+
+    /* ── FAB LOGO IMAGE ── */
     #fab-logo-img {
       width: 40px; height: 40px; object-fit: contain; border-radius: 0;
       filter: drop-shadow(0 0 8px rgba(212,168,67,1)) brightness(1.05);
-      transition: transform 0.3s cubic-bezier(.34,1.56,.64,1), filter 0.2s;
+      will-change: transform, filter;
       pointer-events: none;
+      transition: filter 0.25s ease;
     }
+
+    /* ── FAB 360° SPIN ANIMATION ── */
+    #fab-icon-wrap {
+      will-change: transform;
+      transition: transform 0.55s cubic-bezier(.34,1.56,.64,1);
+    }
+    .fab-btn.spinning #fab-icon-wrap {
+      animation: fabSpin360 0.55s cubic-bezier(.34,1.56,.64,1) forwards;
+    }
+    @keyframes fabSpin360 {
+      0%   { transform: rotate(0deg)   scale(1);    }
+      40%  { transform: rotate(200deg) scale(1.18); }
+      70%  { transform: rotate(340deg) scale(1.15); }
+      85%  { transform: rotate(375deg) scale(1.05); }
+      100% { transform: rotate(360deg) scale(1);    }
+    }
+
+    /* FAB OPEN STATE */
     .fab-btn.open #fab-logo-img {
-      transform: rotate(15deg) scale(1.1);
-      filter: drop-shadow(0 0 14px rgba(212,168,67,1)) brightness(1.2);
+      filter: drop-shadow(0 0 16px rgba(212,168,67,1)) brightness(1.25);
     }
+    .fab-btn.open { background: linear-gradient(145deg,#c8360d,#8b0000) !important; }
+
+    /* FAB NEON PULSE */
     .fab-btn {
       animation: fabNeonPulse 2.8s ease-in-out infinite !important;
     }
@@ -168,6 +226,61 @@ function injectSignatureStyles() {
       50%      { box-shadow: 0 0 0 14px rgba(212,168,67,0.07), 0 0 65px rgba(212,168,67,0.75), 0 8px 40px rgba(0,0,0,0.6); }
     }
     .fab-btn:active { transform: translateX(-50%) scale(0.90) !important; animation: none !important; }
+
+    /* ── FAB ITEMS NEON LED EFFECT ── */
+    .fab-item {
+      position: relative;
+      overflow: hidden;
+    }
+    .fab-neon-dot {
+      position: absolute;
+      top: 5px; right: 5px;
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: var(--gold2, #f5c257);
+      opacity: 0.55;
+      box-shadow: 0 0 5px 1px rgba(212,168,67,0.6), 0 0 10px rgba(212,168,67,0.3);
+      animation: neonDotPulse 2.2s ease-in-out infinite;
+      pointer-events: none;
+    }
+    /* Stagger the pulse for each item */
+    .fab-item:nth-child(1) .fab-neon-dot { animation-delay: 0s;    }
+    .fab-item:nth-child(2) .fab-neon-dot { animation-delay: 0.28s; }
+    .fab-item:nth-child(3) .fab-neon-dot { animation-delay: 0.56s; }
+    .fab-item:nth-child(4) .fab-neon-dot { animation-delay: 0.84s; }
+    .fab-item:nth-child(5) .fab-neon-dot { animation-delay: 1.12s; }
+    .fab-item:nth-child(6) .fab-neon-dot { animation-delay: 1.40s; }
+    .fab-item:nth-child(7) .fab-neon-dot { animation-delay: 1.68s; }
+    .fab-item:nth-child(8) .fab-neon-dot { animation-delay: 1.96s; }
+
+    @keyframes neonDotPulse {
+      0%, 100% { opacity: 0.3;  box-shadow: 0 0 3px 1px rgba(212,168,67,0.4); }
+      50%       { opacity: 0.85; box-shadow: 0 0 7px 2px rgba(212,168,67,0.85), 0 0 14px rgba(212,168,67,0.4); }
+    }
+
+    /* Neon border sweep on active fab-item */
+    .fab-item::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 14px;
+      border: 1px solid transparent;
+      background: linear-gradient(135deg, rgba(212,168,67,0.35), transparent 50%, rgba(212,168,67,0.15)) border-box;
+      -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: destination-out;
+      mask-composite: exclude;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+    }
+    .fab-item:hover::after  { opacity: 0.6; }
+    .fab-item:active { color: var(--gold) !important; }
+    .fab-item:active::after { opacity: 1; }
+    .fab-item:active .fab-item-ico {
+      box-shadow: 0 0 12px rgba(212,168,67,0.4), inset 0 0 8px rgba(212,168,67,0.1) !important;
+      border-color: rgba(212,168,67,0.4) !important;
+      color: var(--gold) !important;
+    }
 
     /* ══════════════════════════════════
        HERO CARD — neon or pulsant
@@ -548,6 +661,22 @@ function hookFABSound() {
     window.toggleFAB = function() {
       WOD_SOUND.fab();
       if (navigator.vibrate) navigator.vibrate([10, 15, 25]);
+
+      // ── 360° SPIN with spring effect ──
+      const fabBtn = document.getElementById('fab-btn');
+      if (fabBtn) {
+        fabBtn.classList.remove('spinning');
+        void fabBtn.offsetWidth; // reflow
+        fabBtn.classList.add('spinning');
+        // Remove class after animation completes
+        fabBtn.addEventListener('animationend', function onEnd(e) {
+          if (e.animationName === 'fabSpin360') {
+            fabBtn.classList.remove('spinning');
+            fabBtn.removeEventListener('animationend', onEnd);
+          }
+        });
+      }
+
       origToggle.apply(this, arguments);
     };
   }
@@ -833,11 +962,23 @@ async function initWODSignature() {
   const src = await WOD_IMG.resolve();
   console.log('[WOD] Logo résolu :', src);
 
-  // Appliquer aux images existantes
-  ['splash-logo-img','fab-logo-img'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) { el.src = src; el.style.borderRadius = '0'; el.style.objectFit = 'contain'; }
-  });
+  // Apply logos: text version for splash, icon for FAB/header
+  const iconSrc = await WOD_IMG.resolveIcon();
+
+  const splashEl = document.getElementById('splash-logo-img');
+  if (splashEl) {
+    splashEl.src = src;
+    splashEl.style.borderRadius = '0';
+    splashEl.style.objectFit   = 'contain';
+    splashEl.style.background  = 'transparent';
+    splashEl.style.border      = 'none';
+  }
+  const fabEl = document.getElementById('fab-logo-img');
+  if (fabEl) { fabEl.src = iconSrc; fabEl.style.borderRadius = '0'; }
+  const hdEl = document.getElementById('hd-wod-logo');
+  if (hdEl) { hdEl.src = iconSrc; }
+
+  document.querySelectorAll('[data-wod-icon]').forEach(el => { el.src = iconSrc; });
   document.querySelectorAll('[data-wod-logo]').forEach(el => { el.src = src; });
 
   // Dhikr — attendre que l'app soit visible
