@@ -39,70 +39,48 @@ const AdhanCalc = (() => {
     return { dec: d, eqt: EqT };
   }
 
-  // ─── Angle horaire ─────────────────────────────────────────────
-  // Formule correcte : cos(H) = (sin(a) - sin(lat)·sin(dec)) / (cos(lat)·cos(dec))
-  // a = altitude (négatif = sous l'horizon, ex: -0.833° pour lever/coucher)
   function hourAngle(lat, dec, angle) {
-    const num = Math.sin(angle * DEG) - Math.sin(lat * DEG) * Math.sin(dec * DEG);
+    const num = Math.cos(angle * DEG) - Math.sin(lat * DEG) * Math.sin(dec * DEG);
     const den = Math.cos(lat * DEG) * Math.cos(dec * DEG);
     if (Math.abs(num / den) > 1) return null;
     return Math.acos(num / den) / DEG;
   }
 
-  // ─── Angle pour Asr ────────────────────────────────────────────
   function asrAngle(lat, dec, shadow) {
     const target = Math.atan(1 / (shadow + Math.tan(Math.abs(lat - dec) * DEG)));
-    const num = Math.sin(target) - Math.sin(lat * DEG) * Math.sin(dec * DEG);
-    const den = Math.cos(lat * DEG) * Math.cos(dec * DEG);
-    if (Math.abs(num / den) > 1) return null;
-    return Math.acos(num / den) / DEG;
+    return Math.acos((Math.sin(target) - Math.sin(lat * DEG) * Math.sin(dec * DEG)) /
+           (Math.cos(lat * DEG) * Math.cos(dec * DEG))) / DEG;
   }
 
-  // ─── Conversion heure solaire UTC → objet Date ─────────────────
-  // hourUTC est en heures décimales depuis minuit UTC du jour julien jd
-  function toDate(jd, hourUTC) {
-    const ms = (jd - 2440587.5) * 86400000 + hourUTC * 3600000;
-    return new Date(ms);
+  function toDate(jd, hour) {
+    // hour est en UTC (temps solaire). On crée un Date UTC pur.
+    // toLocaleTimeString applique automatiquement le fuseau local à l'affichage.
+    const d = new Date((jd - 2440587.5 + hour / 24) * 86400000);
+    return d;
   }
 
   return {
-    // Calcule les horaires pour lat/lon à la date locale donnée
-    calculate(lat, lon, date) {
+    calculate(lat, lon, date, tz) {
       const y = date.getFullYear(), m = date.getMonth() + 1, d = date.getDate();
       const jd = julianDay(y, m, d);
       const { dec, eqt } = sunPosition(jd);
 
-      // Heure UTC du midi solaire
-      const noon = 12 - lon / 15 - eqt;
-
+      const noon    = 12 - lon / 15 - eqt;
       const ha_fajr = hourAngle(lat, dec, -18);
       const ha_rise = hourAngle(lat, dec, -0.833);
       const ha_asr  = asrAngle(lat, dec, 1);
       const ha_sset = hourAngle(lat, dec, -0.833);
       const ha_isha = hourAngle(lat, dec, -17);
 
-      // Fallback 1/7 de nuit pour latitudes élevées en été (Fajr/Isha indéfinis)
-      let fajrDate, ishaDate;
-      if (ha_fajr && ha_isha) {
-        fajrDate = toDate(jd, noon - ha_fajr / 15);
-        ishaDate = toDate(jd, noon + ha_isha / 15);
-      } else {
-        // Calculer la durée de la nuit (coucher → lever) pour le fallback
-        const sunriseUTC = ha_rise ? noon - ha_rise / 15 : noon - 6;
-        const sunsetUTC  = ha_sset ? noon + ha_sset / 15 : noon + 6;
-        const nightDur   = 24 - (sunsetUTC - sunriseUTC);
-        fajrDate = toDate(jd, sunriseUTC - nightDur / 7);
-        ishaDate = toDate(jd, sunsetUTC  + nightDur / 7);
-      }
-
-      return {
-        Fajr:    fajrDate,
+      const times = {
+        Fajr:    ha_fajr ? toDate(jd, noon - ha_fajr / 15) : null,
         Sunrise: ha_rise ? toDate(jd, noon - ha_rise / 15) : null,
         Dhuhr:   toDate(jd, noon + 0.05),
-        Asr:     ha_asr  ? toDate(jd, noon + ha_asr  / 15) : null,
+        Asr:     ha_asr  ? toDate(jd, noon + ha_asr / 15)  : null,
         Maghrib: ha_sset ? toDate(jd, noon + ha_sset / 15) : null,
-        Isha:    ishaDate,
+        Isha:    ha_isha ? toDate(jd, noon + ha_isha / 15) : null,
       };
+      return times;
     }
   };
 })();
@@ -506,62 +484,43 @@ const QIBLA = {
   },
 
   _startCompass() {
-    // La permission boussole est gérée par WOD_PERMISSIONS (onglet Profil)
-    // Si déjà accordée (localStorage), l'écouteur sera démarré par restoreOnStartup()
-    // Sinon : rien à faire ici, l'utilisateur doit activer depuis Profil
-    const btn = document.getElementById('qibla-permission-btn');
-    if (btn) btn.style.display = 'none'; // bouton géré depuis Profil uniquement
+    const handler = (e) => {
+      const h = e.webkitCompassHeading ?? (e.alpha ? (360 - e.alpha) : null);
+      if (h === null) return;
+      this.deviceHeading = h;
+      this._updateNeedle();
+    };
 
-    // Android/navigateurs sans requestPermission : démarrer directement
     if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission !== 'function') {
-      // Pas de permission requise — démarrer et mémoriser
-      if (window.WOD_PERMISSIONS) {
-        localStorage.setItem('wod_perm_compass', '1');
-        window.WOD_PERMISSIONS._compassListening = false;
-        window.WOD_PERMISSIONS._startCompassListener();
-      } else {
-        // Fallback si WOD_PERMISSIONS pas encore prêt
-        window.addEventListener('deviceorientation', (e) => {
-          const h = e.webkitCompassHeading ?? (e.alpha ? (360 - e.alpha) : null);
-          if (h !== null) { this.deviceHeading = h; this._updateNeedle(); }
-        }, true);
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      // iOS 13+
+      const btn = document.getElementById('qibla-permission-btn');
+      if (btn) {
+        btn.style.display = 'flex';
+        btn.onclick = async () => {
+          const perm = await DeviceOrientationEvent.requestPermission();
+          if (perm === 'granted') {
+            window.addEventListener('deviceorientation', handler, true);
+            btn.style.display = 'none';
+          }
+        };
       }
+    } else {
+      window.addEventListener('deviceorientation', handler, true);
     }
   },
 
   _updateNeedle() {
-    const needle     = document.getElementById('qibla-needle');
-    const compassRing= document.getElementById('qibla-compass-ring');
-    const halo       = document.getElementById('qibla-halo');
-    const badge      = document.getElementById('qibla-badge');
+    const needle = document.getElementById('qibla-needle');
+    const halo   = document.getElementById('qibla-halo');
+    const badge  = document.getElementById('qibla-badge');
     if (!needle || this.bearing === null) return;
 
-    // ── LOGIQUE BOUSSOLE CORRECTE ──────────────────────────
-    // La rose des vents (ring) tourne à l'OPPOSÉ du heading de l'appareil
-    // pour que N soit toujours en haut de l'écran
-    // La flèche (needle) pointe vers la Qibla dans le repère de l'écran
-    // Angle Qibla dans repère écran = bearing - heading_appareil
-    const qiblaAngle = (this.bearing - this.deviceHeading + 360) % 360;
-
-    // Rotation de la rose des vents (sens inverse du heading)
-    if (compassRing) {
-      const ringAngle = (-this.deviceHeading + 360) % 360;
-      compassRing.style.transform = `rotate(${ringAngle}deg)`;
-      // Les labels N/E/S/O ne doivent pas tourner avec la ring
-      const marks = compassRing.querySelector('.qibla-compass-marks');
-      if (marks) marks.style.transform = `rotate(${-ringAngle}deg)`;
-    }
-
-    // Rotation de l'aiguille vers la Qibla
-    needle.style.transform = `rotate(${qiblaAngle}deg)`;
-
-    // Affichage degrés (angle absolu de la Qibla)
-    const degEl = document.getElementById('qibla-degrees');
-    if (degEl) degEl.textContent = `${Math.round(this.bearing)}°`;
+    const angle = (this.bearing - this.deviceHeading + 360) % 360;
+    needle.style.transform = `rotate(${angle}deg)`;
 
     // Alignement parfait (±5°)
-    const diff      = Math.abs(((qiblaAngle + 180) % 360) - 180);
+    const diff = Math.abs(((angle + 180) % 360) - 180);
     const isAligned = diff < 5;
     if (isAligned && !this.aligned) {
       this.aligned = true;
@@ -580,6 +539,10 @@ const QIBLA = {
       halo?.classList.remove('aligned');
       badge?.classList.remove('aligned');
     }
+
+    // Degrés affichés
+    const degEl = document.getElementById('qibla-degrees');
+    if (degEl) degEl.textContent = `${Math.round(this.bearing)}°`;
   },
 
   _updateDistance(km) {
@@ -610,7 +573,7 @@ const QIBLA = {
       <!-- Compass -->
       <div class="qibla-compass-wrap">
         <div class="qibla-halo" id="qibla-halo"></div>
-        <div class="qibla-compass-ring" id="qibla-compass-ring">
+        <div class="qibla-compass-ring">
           <div class="qibla-compass-marks">
             <span class="q-mark q-n">N</span>
             <span class="q-mark q-e">E</span>
@@ -673,8 +636,12 @@ const PRAYERS = {
     const lat = window.state?.pos?.lat || 48.8566;
     const lon = window.state?.pos?.lon || 2.3522;
     const now = new Date();
+    const tz  = this._getTimezone();
+
+    // Calcul avec la bonne méthode : on force le calcul sur la date locale,
+    // pas UTC (important pour les fuseaux décalés de minuit)
     const localDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    this.times = AdhanCalc.calculate(lat, lon, localDate);
+    this.times = AdhanCalc.calculate(lat, lon, localDate, tz);
     this._renderTimes();
   },
 
@@ -949,442 +916,6 @@ const HADITH = {
 window.HADITH = HADITH;
 
 // ══════════════════════════════════════════════════════════════
-//  DHIKR — Compteur de Dhikr avec sons, animations, historique
-//  Intégré dans l'onglet Muslim
-// ══════════════════════════════════════════════════════════════
-const DHIKR = {
-  _PHRASES: [
-    { ar: 'سُبْحَانَ اللَّهِ',      fr: 'Gloire à Allah',              target: 33, color: '#2dd4a0' },
-    { ar: 'الحَمْدُ لِلَّهِ',       fr: 'Louange à Allah',             target: 33, color: '#d4a843' },
-    { ar: 'اللَّهُ أَكْبَرُ',       fr: 'Allah est Le Plus Grand',     target: 34, color: '#f5c257' },
-    { ar: 'لَا إِلَهَ إِلَّا اللَّهُ', fr: 'Nulle divinité sinon Allah', target: 100, color: '#c084fc' },
-    { ar: 'أَسْتَغْفِرُ اللَّهَ',   fr: 'Je demande pardon à Allah',   target: 100, color: '#60a5fa' },
-    { ar: 'اللَّهُمَّ صَلِّ عَلَى مُحَمَّد', fr: 'Prière sur le Prophète ﷺ', target: 100, color: '#fb923c' },
-  ],
-
-  _count:    0,
-  _phraseIdx:0,
-  _history:  [],
-  _LS_KEY:   'wod_dhikr_v1',
-
-  init() {
-    this._loadState();
-    this._render();
-  },
-
-  _loadState() {
-    try {
-      const raw = localStorage.getItem(this._LS_KEY);
-      if (raw) {
-        const s = JSON.parse(raw);
-        this._count    = s.count    || 0;
-        this._phraseIdx= s.phraseIdx|| 0;
-        this._history  = s.history  || [];
-      }
-    } catch(e) {}
-  },
-
-  _saveState() {
-    try {
-      localStorage.setItem(this._LS_KEY, JSON.stringify({
-        count: this._count, phraseIdx: this._phraseIdx, history: this._history.slice(0, 30)
-      }));
-    } catch(e) {}
-  },
-
-  _currentPhrase() { return this._PHRASES[this._phraseIdx]; },
-
-  tap() {
-    const phrase = this._currentPhrase();
-    this._count++;
-    this._playTapSound();
-    this._animateRipple();
-    this._updateDisplay();
-
-    // Vibration légère
-    if (navigator.vibrate) navigator.vibrate(12);
-
-    // Atteint la cible
-    if (this._count === phrase.target) {
-      this._onTargetReached();
-    }
-    this._saveState();
-  },
-
-  _onTargetReached() {
-    const phrase = this._currentPhrase();
-    if (navigator.vibrate) navigator.vibrate([30, 20, 60, 20, 100]);
-    this._playSuccessSound();
-
-    // Sauvegarder dans l'historique
-    this._history.unshift({
-      phrase:    phrase.fr,
-      count:     this._count,
-      ts:        Date.now(),
-    });
-
-    // Flash célébration
-    const btn = document.getElementById('dhikr-btn');
-    if (btn) {
-      btn.classList.add('dhikr-complete');
-      setTimeout(() => btn.classList.remove('dhikr-complete'), 1200);
-    }
-
-    // Message de célébration
-    const msgEl = document.getElementById('dhikr-msg');
-    if (msgEl) {
-      msgEl.textContent = `✨ ${phrase.target} fois accompli ! ما شاء الله`;
-      msgEl.style.opacity = '1';
-      setTimeout(() => { msgEl.style.opacity = '0'; }, 3000);
-    }
-
-    // Passer à la phrase suivante après 1.5s
-    setTimeout(() => {
-      this._count     = 0;
-      this._phraseIdx = (this._phraseIdx + 1) % this._PHRASES.length;
-      this._updateDisplay();
-      this._updatePhrase();
-      this._saveState();
-    }, 1500);
-
-    this._renderHistory();
-  },
-
-  reset() {
-    this._count = 0;
-    this._updateDisplay();
-    this._saveState();
-    if (navigator.vibrate) navigator.vibrate([20, 10, 20]);
-  },
-
-  switchPhrase(idx) {
-    this._count     = 0;
-    this._phraseIdx = idx;
-    this._updateDisplay();
-    this._updatePhrase();
-    this._saveState();
-
-    // Mettre à jour les boutons
-    document.querySelectorAll('.dhikr-phrase-btn').forEach((b, i) => {
-      b.classList.toggle('dhikr-phrase-active', i === idx);
-    });
-  },
-
-  _updateDisplay() {
-    const phrase = this._currentPhrase();
-    const countEl= document.getElementById('dhikr-count');
-    const progEl = document.getElementById('dhikr-progress-bar');
-    const remEl  = document.getElementById('dhikr-remaining');
-    const totEl  = document.getElementById('dhikr-total-session');
-
-    if (countEl) {
-      countEl.textContent = this._count;
-      countEl.style.color = phrase.color;
-    }
-    if (progEl) {
-      const pct = Math.min(100, (this._count / phrase.target) * 100);
-      progEl.style.width  = pct + '%';
-      progEl.style.background = `linear-gradient(90deg, ${phrase.color}, ${phrase.color}88)`;
-    }
-    if (remEl) {
-      const rem = phrase.target - this._count;
-      remEl.textContent = rem > 0 ? `${rem} restant${rem > 1 ? 's' : ''}` : '✅ Complété !';
-      remEl.style.color = rem === 0 ? '#2dd4a0' : 'var(--text-dim)';
-    }
-    if (totEl) {
-      const total = this._history.reduce((s, h) => s + h.count, 0) + this._count;
-      totEl.textContent = total.toLocaleString('fr-FR');
-    }
-  },
-
-  _updatePhrase() {
-    const phrase  = this._currentPhrase();
-    const arEl    = document.getElementById('dhikr-arabic');
-    const frEl    = document.getElementById('dhikr-french');
-    const targetEl= document.getElementById('dhikr-target');
-    if (arEl) { arEl.textContent = phrase.ar; arEl.style.color = phrase.color; }
-    if (frEl) frEl.textContent   = phrase.fr;
-    if (targetEl) targetEl.textContent = `Objectif : ${phrase.target}×`;
-  },
-
-  _animateRipple() {
-    const btn = document.getElementById('dhikr-btn');
-    if (!btn) return;
-    const ripple = document.createElement('span');
-    ripple.className = 'dhikr-ripple';
-    btn.appendChild(ripple);
-    setTimeout(() => ripple.remove(), 600);
-  },
-
-  _playTapSound() {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain= ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.08);
-      gain.gain.setValueAtTime(0.12, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
-      osc.type = 'sine';
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.12);
-    } catch(e) {}
-  },
-
-  _playSuccessSound() {
-    try {
-      const ctx  = new (window.AudioContext || window.webkitAudioContext)();
-      const notes= [523.25, 659.25, 783.99, 1046.5]; // C5 E5 G5 C6
-      notes.forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const g   = ctx.createGain();
-        osc.connect(g); g.connect(ctx.destination);
-        osc.frequency.value = freq;
-        osc.type = 'sine';
-        const t = ctx.currentTime + i * 0.12;
-        g.gain.setValueAtTime(0, t);
-        g.gain.linearRampToValueAtTime(0.2, t + 0.04);
-        g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-        osc.start(t); osc.stop(t + 0.35);
-      });
-    } catch(e) {}
-  },
-
-  _renderHistory() {
-    const el = document.getElementById('dhikr-history-list'); if (!el) return;
-    if (!this._history.length) { el.innerHTML = '<div style="font-size:.72rem;color:var(--text-dim)">Aucun dhikr complété</div>'; return; }
-    el.innerHTML = this._history.slice(0, 5).map(h => {
-      const d = new Date(h.ts);
-      const t = d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
-      return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:.72rem;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05);">
-        <span style="color:var(--text)">${h.phrase}</span>
-        <span style="color:var(--gold);font-weight:700;">×${h.count} <span style="color:var(--text-dim);font-weight:400;">${t}</span></span>
-      </div>`;
-    }).join('');
-  },
-
-  _render() {
-    const screen = document.getElementById('screen-muslim');
-    if (!screen) return;
-    const scroll = screen.querySelector('.screen-scroll');
-    if (!scroll) return;
-    if (document.getElementById('dhikr-card')) return;
-
-    const phrase = this._currentPhrase();
-
-    const card = document.createElement('div');
-    card.id = 'dhikr-card';
-    card.className = 'msl-card dhikr-card';
-    card.innerHTML = `
-      <div class="msl-card-hd">
-        <div class="msl-card-icon">📿</div>
-        <div>
-          <div class="msl-card-title">Compteur de Dhikr</div>
-          <div class="msl-card-sub">Tasbih numérique · Voix du cœur</div>
-        </div>
-        <div id="dhikr-total-wrap" style="margin-left:auto;text-align:right;">
-          <div style="font-size:.58rem;color:var(--text-dim);letter-spacing:.08em">TOTAL SESSION</div>
-          <div id="dhikr-total-session" style="font-family:'DM Mono',monospace;font-size:.82rem;font-weight:700;color:var(--gold)">0</div>
-        </div>
-      </div>
-
-      <!-- Sélecteur de phrases -->
-      <div class="dhikr-phrases-row" id="dhikr-phrases-row">
-        ${this._PHRASES.map((p, i) => `
-          <button class="dhikr-phrase-btn ${i === this._phraseIdx ? 'dhikr-phrase-active' : ''}"
-            onclick="DHIKR.switchPhrase(${i})"
-            style="--phrase-color:${p.color}">
-            ${p.fr.split(' ').slice(0,2).join(' ')}
-          </button>`).join('')}
-      </div>
-
-      <!-- Texte arabe + traduction -->
-      <div class="dhikr-text-wrap">
-        <div class="dhikr-arabic" id="dhikr-arabic" style="color:${phrase.color}">${phrase.ar}</div>
-        <div class="dhikr-french" id="dhikr-french">${phrase.fr}</div>
-        <div class="dhikr-target-lbl" id="dhikr-target">Objectif : ${phrase.target}×</div>
-      </div>
-
-      <!-- Barre de progression -->
-      <div class="dhikr-progress-track">
-        <div class="dhikr-progress-bar" id="dhikr-progress-bar" style="width:0%;background:${phrase.color}"></div>
-      </div>
-
-      <!-- Compteur principal + bouton -->
-      <div class="dhikr-counter-wrap">
-        <div class="dhikr-count" id="dhikr-count" style="color:${phrase.color}">0</div>
-        <div class="dhikr-remaining" id="dhikr-remaining">${phrase.target} restants</div>
-      </div>
-
-      <!-- Bouton Tap -->
-      <button class="dhikr-btn" id="dhikr-btn" onclick="DHIKR.tap()" style="--dhikr-color:${phrase.color}">
-        <span class="dhikr-btn-ico">📿</span>
-        <span class="dhikr-btn-lbl">DHIKR</span>
-      </button>
-
-      <!-- Message célébration -->
-      <div class="dhikr-msg" id="dhikr-msg" style="opacity:0"></div>
-
-      <!-- Bouton reset -->
-      <div style="display:flex;justify-content:center;margin-top:10px;">
-        <button class="msl-perm-btn" onclick="DHIKR.reset()" style="font-size:.68rem;padding:7px 16px;">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.93"/></svg>
-          Réinitialiser
-        </button>
-      </div>
-
-      <!-- Historique -->
-      <div style="margin-top:14px;">
-        <div style="font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim);margin-bottom:8px;">Historique du jour</div>
-        <div id="dhikr-history-list"></div>
-      </div>
-    `;
-
-    // Insérer avant le hadith (dernier widget)
-    const hadithCard = scroll.querySelector('.hadith-card');
-    if (hadithCard) scroll.insertBefore(card, hadithCard);
-    else scroll.appendChild(card);
-
-    // Injecter les styles dhikr
-    this._injectStyles();
-
-    // Mettre à jour l'affichage
-    this._updateDisplay();
-    this._updatePhrase();
-    this._renderHistory();
-  },
-
-  _injectStyles() {
-    if (document.getElementById('dhikr-styles')) return;
-    const s = document.createElement('style');
-    s.id = 'dhikr-styles';
-    s.textContent = `
-      .dhikr-card { animation: dhikrBreath 5s ease-in-out infinite; }
-      @keyframes dhikrBreath {
-        0%,100% { box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 0 20px rgba(212,168,67,0.05); }
-        50%      { box-shadow: 0 8px 40px rgba(0,0,0,0.5),  0 0 40px rgba(212,168,67,0.12); }
-      }
-
-      /* Sélecteur de phrases */
-      .dhikr-phrases-row {
-        display: flex; flex-wrap: wrap; gap: 6px;
-        margin-bottom: 14px;
-      }
-      .dhikr-phrase-btn {
-        font-size: .62rem; font-weight: 700;
-        padding: 5px 10px; border-radius: 20px; cursor: pointer;
-        border: 1px solid rgba(255,255,255,.1);
-        background: rgba(255,255,255,.04);
-        color: var(--text-dim);
-        transition: all .2s;
-        font-family: 'DM Sans', sans-serif;
-      }
-      .dhikr-phrase-btn:active { transform: scale(.95); }
-      .dhikr-phrase-active {
-        background: rgba(var(--phrase-color-rgb), .15) !important;
-        border-color: var(--phrase-color) !important;
-        color: var(--phrase-color) !important;
-      }
-      .dhikr-phrase-btn.dhikr-phrase-active {
-        background: rgba(212,168,67,.15);
-        border-color: var(--phrase-color);
-        color: var(--phrase-color);
-        box-shadow: 0 0 10px rgba(212,168,67,.2);
-      }
-
-      /* Texte arabe */
-      .dhikr-text-wrap { text-align: center; margin-bottom: 14px; }
-      .dhikr-arabic {
-        font-size: 1.4rem; font-weight: 700; direction: rtl;
-        font-family: 'Amiri', 'Arial', serif; letter-spacing: .03em;
-        line-height: 1.8; margin-bottom: 6px;
-        text-shadow: 0 0 20px currentColor;
-        transition: color .3s;
-      }
-      .dhikr-french { font-size: .8rem; color: var(--text); font-style: italic; margin-bottom: 4px; }
-      .dhikr-target-lbl { font-size: .62rem; color: var(--text-dim); letter-spacing: .08em; }
-
-      /* Progression */
-      .dhikr-progress-track {
-        height: 4px; background: rgba(255,255,255,.08); border-radius: 4px;
-        overflow: hidden; margin-bottom: 18px;
-      }
-      .dhikr-progress-bar { height: 100%; border-radius: 4px; transition: width .3s ease; }
-
-      /* Compteur */
-      .dhikr-counter-wrap { text-align: center; margin-bottom: 16px; }
-      .dhikr-count {
-        font-size: 4.5rem; font-weight: 900; line-height: 1;
-        font-family: 'DM Mono', monospace; letter-spacing: -.04em;
-        transition: color .3s;
-        text-shadow: 0 0 30px currentColor;
-      }
-      .dhikr-remaining {
-        font-size: .72rem; color: var(--text-dim); margin-top: 4px;
-        transition: color .3s;
-      }
-
-      /* Bouton principal */
-      .dhikr-btn {
-        display: flex; flex-direction: column; align-items: center; justify-content: center;
-        width: 100%; padding: 22px 0;
-        background: radial-gradient(ellipse at 50% 0%, rgba(212,168,67,.12), rgba(0,0,0,0) 60%),
-                    rgba(255,255,255,.03);
-        border: 1.5px solid rgba(212,168,67,.2);
-        border-radius: 20px; cursor: pointer;
-        position: relative; overflow: hidden;
-        transition: all .15s;
-        font-family: 'DM Sans', sans-serif;
-        -webkit-tap-highlight-color: transparent;
-      }
-      .dhikr-btn:active { transform: scale(.97); }
-      .dhikr-btn-ico { font-size: 2rem; margin-bottom: 6px; }
-      .dhikr-btn-lbl {
-        font-size: .6rem; font-weight: 800; letter-spacing: .2em;
-        color: var(--gold); text-transform: uppercase;
-      }
-      .dhikr-btn.dhikr-complete {
-        border-color: #2dd4a0 !important;
-        background: rgba(45,212,160,.12) !important;
-        animation: dhikrComplete .6s ease;
-      }
-      @keyframes dhikrComplete {
-        0%   { transform: scale(1); }
-        30%  { transform: scale(1.04); }
-        60%  { transform: scale(.98); }
-        100% { transform: scale(1); }
-      }
-
-      /* Ripple */
-      .dhikr-ripple {
-        position: absolute;
-        border-radius: 50%;
-        width: 80px; height: 80px;
-        background: rgba(212,168,67,.25);
-        transform: scale(0);
-        animation: dhikrRipple .6s ease-out;
-        pointer-events: none;
-        top: 50%; left: 50%; margin: -40px 0 0 -40px;
-      }
-      @keyframes dhikrRipple {
-        to { transform: scale(4); opacity: 0; }
-      }
-
-      /* Message */
-      .dhikr-msg {
-        text-align: center; font-size: .82rem; font-weight: 700;
-        color: #2dd4a0; margin-top: 10px;
-        transition: opacity .5s ease;
-        min-height: 1.2em;
-      }
-    `;
-    document.head.appendChild(s);
-  },
-};
-window.DHIKR = DHIKR;
-
-// ══════════════════════════════════════════════════════════════
 //  STYLES CSS DU MODULE MUSLIM
 // ══════════════════════════════════════════════════════════════
 function injectMuslimStyles() {
@@ -1529,14 +1060,10 @@ function injectMuslimStyles() {
         inset 0 0 40px rgba(0,0,0,0.6),
         0 0 0 1px rgba(212,168,67,0.08),
         0 0 30px rgba(212,168,67,0.1);
-      transition: transform 0.15s linear;
-      will-change: transform;
     }
     .qibla-compass-marks {
       position: absolute; inset: 0;
       pointer-events: none;
-      transition: transform 0.15s linear;
-      will-change: transform;
     }
     .q-mark {
       position: absolute;
@@ -1551,8 +1078,7 @@ function injectMuslimStyles() {
     .qibla-needle-wrap {
       position: absolute; inset: 0;
       display: flex; align-items: center; justify-content: center;
-      transition: transform 0.15s linear;
-      will-change: transform;
+      transition: transform 0.4s cubic-bezier(.34,1.1,.64,1);
     }
     .qibla-needle-body {
       position: relative;
@@ -1801,233 +1327,52 @@ function injectMuslimFABItem() {
 // ══════════════════════════════════════════════════════════════
 //  INIT PRINCIPAL DU MODULE
 // ══════════════════════════════════════════════════════════════
-function initMuslimModule() {
-  injectMuslimStyles();
-  injectMuslimScreen();
-  injectMuslimFABItem();
+let _muslimWidgetsInited = false;
 
-  // Attendre que l'app soit visible
-  const tryInit = () => {
-    const app = document.getElementById('app');
-    if (!app?.classList.contains('hidden')) {
-      setTimeout(() => {
-        // 1. Permissions en premier (lit le localStorage)
-        WOD_PERMISSIONS.restoreOnStartup();
-        // 2. Modules qui dépendent des permissions
-        QIBLA.init();
-        PRAYERS.init();
-        HADITH.init();
-        DHIKR.init();
-        // 3. Panel profil (peut être injecté après)
-        setTimeout(() => WOD_PERMISSIONS.injectProfilPanel(), 300);
-      }, 600);
-    } else {
-      const obs = new MutationObserver(() => {
-        if (!app?.classList.contains('hidden')) {
-          obs.disconnect();
-          setTimeout(() => {
-            WOD_PERMISSIONS.restoreOnStartup();
-            QIBLA.init();
-            PRAYERS.init();
-            HADITH.init();
-            DHIKR.init();
-            setTimeout(() => WOD_PERMISSIONS.injectProfilPanel(), 300);
-          }, 600);
-        }
-      });
-      if (app) obs.observe(app, { attributes: true, attributeFilter: ['class'] });
-    }
-  };
-  tryInit();
+function _initMuslimWidgets() {
+  if (_muslimWidgetsInited) return;
+  _muslimWidgetsInited = true;
+  QIBLA.init();
+  PRAYERS.init();
+  HADITH.init();
+}
 
-  // Hook goTo
-  const _origGoTo = window.goTo;
+function _hookMuslimGoTo() {
+  const _orig = window.goTo;
+  if (typeof _orig !== 'function') { setTimeout(_hookMuslimGoTo, 100); return; }
   window.goTo = function(id) {
-    _origGoTo(id);
+    _orig(id);
     if (id === 'muslim') {
-      setTimeout(() => { PRAYERS._calculate(); QIBLA._startGPS(); }, 200);
-    }
-    if (id === 'profil') {
-      setTimeout(() => WOD_PERMISSIONS.updateProfilUI(), 150);
+      setTimeout(() => {
+        _initMuslimWidgets();
+        PRAYERS._calculate();
+        QIBLA._startGPS();
+      }, 200);
     }
   };
 }
 
-// ══════════════════════════════════════════════════════════════
-//  WOD PERMISSIONS — Boussole & Rappels prière depuis Profil
-//  Persistance via localStorage — pas de redemande à chaque ouverture
-// ══════════════════════════════════════════════════════════════
-const WOD_PERMISSIONS = {
-  LS_COMPASS: 'wod_perm_compass',
-  LS_NOTIF:   'wod_perm_notif',
+function initMuslimModule() {
+  injectMuslimStyles();
+  injectMuslimScreen();
+  injectMuslimFABItem();
+  _hookMuslimGoTo();
 
-  // Restaure les permissions au démarrage
-  restoreOnStartup() {
-    // Notifications : si le navigateur a déjà accordé → mémoriser
-    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      localStorage.setItem(this.LS_NOTIF, '1');
-    }
-    // Boussole : si déjà accordée → réactiver l'écouteur directement
-    if (localStorage.getItem(this.LS_COMPASS) === '1') {
-      this._startCompassListener();
-    }
-  },
-
-  // Démarre l'écouteur orientation (appelé après permission)
-  _startCompassListener() {
-    if (this._compassListening) return;
-    this._compassListening = true;
-    const handler = (e) => {
-      const h = e.webkitCompassHeading ?? (e.alpha ? (360 - e.alpha) : null);
-      if (h === null) return;
-      if (window.QIBLA) { window.QIBLA.deviceHeading = h; window.QIBLA._updateNeedle(); }
-    };
-    window.addEventListener('deviceorientation', handler, true);
-    const btn = document.getElementById('qibla-permission-btn');
-    if (btn) btn.style.display = 'none';
-  },
-
-  async requestCompass() {
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      try {
-        const perm = await DeviceOrientationEvent.requestPermission();
-        if (perm === 'granted') {
-          localStorage.setItem(this.LS_COMPASS, '1');
-          this._compassListening = false; // reset pour re-attacher
-          this._startCompassListener();
-          this.updateProfilUI();
-          if (typeof showToast === 'function') showToast('✅ Boussole activée');
-        } else {
-          if (typeof showToast === 'function') showToast('⚠️ Permission boussole refusée');
-        }
-      } catch(e) {
-        if (typeof showToast === 'function') showToast('⚠️ Erreur permission boussole');
+  // Si l'app est déjà visible au chargement, init direct
+  const app = document.getElementById('app');
+  if (!app) return;
+  if (!app.classList.contains('hidden')) {
+    setTimeout(_initMuslimWidgets, 800);
+  } else {
+    const obs = new MutationObserver(() => {
+      if (!app.classList.contains('hidden')) {
+        obs.disconnect();
+        // Les widgets s'initialisent au premier goTo('muslim')
       }
-    } else {
-      // Android/desktop : accès direct
-      localStorage.setItem(this.LS_COMPASS, '1');
-      this._compassListening = false;
-      this._startCompassListener();
-      this.updateProfilUI();
-      if (typeof showToast === 'function') showToast('✅ Boussole activée');
-    }
-  },
-
-  revokeCompass() {
-    localStorage.setItem(this.LS_COMPASS, '0');
-    this._compassListening = false;
-    this.updateProfilUI();
-    if (typeof showToast === 'function') showToast('Boussole désactivée');
-  },
-
-  async requestNotif() {
-    if (!('Notification' in window)) {
-      if (typeof showToast === 'function') showToast('⚠️ Notifications non supportées');
-      return;
-    }
-    if (Notification.permission === 'granted') {
-      localStorage.setItem(this.LS_NOTIF, '1');
-      this.updateProfilUI();
-      if (typeof showToast === 'function') showToast('✅ Rappels déjà activés');
-      return;
-    }
-    const perm = await Notification.requestPermission();
-    if (perm === 'granted') {
-      localStorage.setItem(this.LS_NOTIF, '1');
-    } else {
-      localStorage.setItem(this.LS_NOTIF, '0');
-    }
-    this.updateProfilUI();
-    if (typeof showToast === 'function') showToast(perm === 'granted' ? '✅ Rappels activés' : '⚠️ Refusé dans les réglages');
-  },
-
-  revokeNotif() {
-    localStorage.setItem(this.LS_NOTIF, '0');
-    this.updateProfilUI();
-    if (typeof showToast === 'function') showToast('Rappels prière désactivés');
-  },
-
-  isCompassOn()  { return localStorage.getItem(this.LS_COMPASS) === '1'; },
-  isNotifOn()    { return localStorage.getItem(this.LS_NOTIF) === '1' && typeof Notification !== 'undefined' && Notification.permission === 'granted'; },
-
-  updateProfilUI() {
-    const ct = document.getElementById('perm-compass-toggle');
-    const nt = document.getElementById('perm-notif-toggle');
-    const cs = document.getElementById('perm-compass-status');
-    const ns = document.getElementById('perm-notif-status');
-    if (ct) {
-      const on = this.isCompassOn();
-      ct.classList.toggle('perm-on', on); ct.classList.toggle('perm-off', !on);
-      if (cs) cs.textContent = on ? 'Activée' : 'Désactivée';
-    }
-    if (nt) {
-      const on = this.isNotifOn();
-      nt.classList.toggle('perm-on', on); nt.classList.toggle('perm-off', !on);
-      if (ns) ns.textContent = on ? 'Activés' : 'Désactivés';
-    }
-  },
-
-  injectProfilPanel() {
-    if (document.getElementById('wod-permissions-card')) return;
-    const profilScroll = document.querySelector('#screen-profil .screen-scroll');
-    if (!profilScroll) return;
-
-    const card = document.createElement('div');
-    card.id = 'wod-permissions-card';
-    card.className = 'card accordion-card';
-    card.innerHTML = `
-      <div class="acc-hd" onclick="toggleAccordion('wod-permissions-card')">
-        <span class="card-title" style="margin:0">🔐 Autorisations</span>
-        <svg class="acc-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-      </div>
-      <div class="acc-body">
-        <div style="display:flex;flex-direction:column;gap:14px;padding-top:4px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div>
-              <div style="font-weight:700;font-size:.88rem;">🧭 Boussole Qibla</div>
-              <div style="font-size:.75rem;color:var(--text-dim);margin-top:2px;">Orientation vers La Mecque · <span id="perm-compass-status">Désactivée</span></div>
-            </div>
-            <button id="perm-compass-toggle" class="perm-toggle perm-off" onclick="WOD_PERMISSIONS._onCompassToggle()">
-              <span class="perm-knob"></span>
-            </button>
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div>
-              <div style="font-weight:700;font-size:.88rem;">🔔 Rappels de prière</div>
-              <div style="font-size:.75rem;color:var(--text-dim);margin-top:2px;">Notification 5 min avant · <span id="perm-notif-status">Désactivés</span></div>
-            </div>
-            <button id="perm-notif-toggle" class="perm-toggle perm-off" onclick="WOD_PERMISSIONS._onNotifToggle()">
-              <span class="perm-knob"></span>
-            </button>
-          </div>
-        </div>
-      </div>`;
-
-    const dangerCard = profilScroll.querySelector('.card-danger');
-    if (dangerCard) profilScroll.insertBefore(card, dangerCard);
-    else profilScroll.appendChild(card);
-
-    if (!document.getElementById('perm-toggle-css')) {
-      const s = document.createElement('style');
-      s.id = 'perm-toggle-css';
-      s.textContent = `
-        .perm-toggle { position:relative; width:50px; height:28px; border-radius:14px; border:none; cursor:pointer; transition:background .3s; flex-shrink:0; outline:none; }
-        .perm-toggle.perm-off { background:rgba(255,255,255,0.12); }
-        .perm-toggle.perm-on  { background:linear-gradient(135deg,#d4a843,#f5c257); box-shadow:0 0 12px rgba(212,168,67,0.5); }
-        .perm-knob { position:absolute; top:3px; width:22px; height:22px; background:#fff; border-radius:50%; transition:left .3s cubic-bezier(.34,1.56,.64,1); box-shadow:0 2px 6px rgba(0,0,0,.3); }
-        .perm-toggle.perm-off .perm-knob { left:3px; }
-        .perm-toggle.perm-on  .perm-knob { left:25px; }`;
-      document.head.appendChild(s);
-    }
-    this.updateProfilUI();
-  },
-
-  _onCompassToggle() { this.isCompassOn() ? this.revokeCompass() : this.requestCompass(); },
-  _onNotifToggle()   { this.isNotifOn()   ? this.revokeNotif()   : this.requestNotif();  },
-  _compassListening: false,
-};
-window.WOD_PERMISSIONS = WOD_PERMISSIONS;
+    });
+    obs.observe(app, { attributes: true, attributeFilter: ['class'] });
+  }
+}
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initMuslimModule);
