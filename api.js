@@ -25,7 +25,7 @@ const WOB_CONFIG = {
 
   // IDFM PRIM — https://prim.iledefrance-mobilites.fr (votre clé IDF Mobilités)
   // Remplacez par votre clé PRIM IDF Mobilités (format: ex. "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-  IDFM_KEY: 'VOTRE_CLE_IDFM_PRIM',   // ← collez ici votre clé IDF Mobilités
+  IDFM_KEY: 'nvCfwMmHDiu41GKK6yytwFb53LD1nzl2',   // ← collez ici votre clé IDF Mobilités
 
   // Navitia legacy (désactivé — clé expirée, remplacé par PRIM IDFM ci-dessus)
   NAVITIA_KEY: 'tmvRLg8J6MvXpjTFKOuqxwlIJ7oMtFtt',
