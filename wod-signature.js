@@ -214,18 +214,21 @@ const WOD_STARS = (() => {
   let nextSpawn = 9000;
 
   function initCanvas() {
-    canvas = document.createElement('canvas');
-    canvas.id = 'wod-star-canvas';
-    canvas.style.cssText = `
-      position:fixed;inset:0;width:100%;height:100%;
-      pointer-events:none;z-index:0;opacity:1;
-    `;
-    document.body.insertBefore(canvas, document.body.firstChild);
-    resize();
-    window.addEventListener('resize', resize);
+    try {
+      canvas = document.createElement('canvas');
+      canvas.id = 'wod-star-canvas';
+      canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;opacity:1;';
+      document.body.insertBefore(canvas, document.body.firstChild);
+      ctx2d = canvas.getContext('2d');
+      if (!ctx2d) { console.warn('[WOD Stars] Canvas 2D non disponible'); return false; }
+      resize();
+      window.addEventListener('resize', resize);
+      return true;
+    } catch(e) { console.warn('[WOD Stars] initCanvas:', e.message); return false; }
   }
 
   function resize() {
+    if (!canvas) return;
     w = canvas.width  = window.innerWidth;
     h = canvas.height = window.innerHeight;
   }
@@ -252,7 +255,8 @@ const WOD_STARS = (() => {
 
   function draw(ts) {
     raf = requestAnimationFrame(draw);
-    ctx2d.clearRect(0, 0, w, h);
+    if (!ctx2d) return; // guard — évite le crash clearRect
+    try { ctx2d.clearRect(0, 0, w, h); } catch(e) { return; }
 
     // Spawn aléatoire rare
     if (!lastSpawn) lastSpawn = ts;
@@ -309,8 +313,11 @@ const WOD_STARS = (() => {
 
   return {
     init() {
-      initCanvas();
-      raf = requestAnimationFrame(draw);
+      try {
+        const ok = initCanvas();
+        if (!ok) return;
+        raf = requestAnimationFrame(draw);
+      } catch(e) { console.warn('[WOD Stars] init:', e.message); }
     }
   };
 })();

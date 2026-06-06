@@ -998,9 +998,8 @@ window.loadEvents = async function(forceRefresh) {
   const el = $('events-list');
   if (!el) return;
 
-  // Check cache first (max 30min)
-  const cache = ls('wob_events');
-  const cacheTs = parseInt(ls('wob_events_ts') || '0');
+  const cache    = ls('wob_events');
+  const cacheTs  = parseInt(ls('wob_events_ts') || '0');
   const cacheAge = Date.now() - cacheTs;
   const CACHE_MAX = 30 * 60 * 1000;
 
@@ -1012,74 +1011,91 @@ window.loadEvents = async function(forceRefresh) {
   el.innerHTML = `<div class="list-item info">Chargement des événements...</div>`;
 
   try {
-    const today     = new Date().toISOString().split('T')[0];
-    const in21d     = new Date(Date.now() + 21 * 86400000).toISOString().split('T')[0];
+    const today = new Date().toISOString().split('T')[0];
+    const in21d = new Date(Date.now() + 21 * 86400000).toISOString().split('T')[0];
     let results = null;
 
-    // ── Tentative 1 : Paris OpenData (que-faire-à-paris) ──
+    // ── Source 1 : Paris OpenData que-faire-a-paris (CORS OK) ──
     try {
-      const where = `date_start >= date'${today}' AND date_start <= date'${in21d}'`;
+      const where    = `date_start >= date'${today}' AND date_start <= date'${in21d}'`;
       const parisUrl = `https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records`
         + `?where=${encodeURIComponent(where)}&order_by=date_start&limit=25`
         + `&select=title,date_start,address_name,address_zipcode,tags,url,price_type`;
       const ctrl1 = new AbortController();
-      const t1 = setTimeout(() => ctrl1.abort(), 10000);
-      const r1 = await fetch(parisUrl, { signal: ctrl1.signal });
+      const t1    = setTimeout(() => ctrl1.abort(), 10000);
+      const r1    = await fetch(parisUrl, {
+        signal: ctrl1.signal,
+        headers: { 'Accept': 'application/json' },
+      });
       clearTimeout(t1);
       if (r1.ok) {
         const d1 = await r1.json();
-        if (d1.results?.length >= 1) results = d1.results;
+        if (d1.results?.length >= 1) {
+          results = d1.results;
+          console.log('[Events] Paris OpenData OK:', results.length, 'événements');
+        } else {
+          console.warn('[Events] Paris OpenData: 0 résultats');
+        }
+      } else {
+        console.warn('[Events] Paris OpenData HTTP:', r1.status);
       }
     } catch(e1) { console.warn('[Events] Paris OD:', e1.message); }
 
-    // ── Tentative 2 : OpenAgenda Paris (public, sans clé) ──
+    // ── Source 2 : Open Data IDF Culturel (dataset corrigé) ──
     if (!results) {
       try {
-        // OpenAgenda agenda public Ville de Paris — id: 45825166
-        const agUrl = `https://api.openagenda.com/v2/events?oaid=45825166&size=20`
-          + `&relative[]=upcoming&relative[]=current`
-          + `&fields[]=title,firstTiming,location,tags,slug`;
-        const ctrl2 = new AbortController();
-        const t2 = setTimeout(() => ctrl2.abort(), 10000);
-        const r2 = await fetch(agUrl, { signal: ctrl2.signal });
-        clearTimeout(t2);
-        if (r2.ok) {
-          const d2 = await r2.json();
-          if (d2.events?.length >= 1) {
-            // Normaliser vers format interne
-            results = d2.events.map(ev => ({
-              title:        ev.title?.fr || ev.title?.en || 'Événement Paris',
-              date_start:   ev.firstTiming?.begin?.split('T')[0] || today,
-              address_name: ev.location?.name || 'Paris',
-              address_zipcode: ev.location?.postalCode || '75001',
-              tags:         (ev.tags || []).join(' '),
-            }));
-          }
-        }
-      } catch(e2) { console.warn('[Events] OpenAgenda:', e2.message); }
-    }
-
-    // ── Tentative 3 : Parisinfo / Ticketing IDF Open Data ──
-    if (!results) {
-      try {
-        const idfUrl = `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-du-service-culturel-de-la-region-ile-de-france/records`
-          + `?limit=20&order_by=date_debut&select=nom,date_debut,commune,type_evenement`;
-        const ctrl3 = new AbortController();
-        const t3 = setTimeout(() => ctrl3.abort(), 8000);
-        const r3 = await fetch(idfUrl, { signal: ctrl3.signal });
-        clearTimeout(t3);
-        if (r3.ok) {
-          const d3 = await r3.json();
-          if (d3.results?.length >= 1) {
-            results = d3.results.map(ev => ({
-              title:        ev.nom || 'Événement IDF',
-              date_start:   ev.date_debut?.split('T')[0] || today,
-              address_name: ev.commune || 'Île-de-France',
-              tags:         ev.type_evenement || '',
-            }));
+        // Dataset correct 2025 : "les-evenements-culturels-de-la-region-ile-de-france"
+        const idfUrls = [
+          `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-culturels-de-la-region-ile-de-france/records?limit=20&order_by=date_debut&select=nom,date_debut,commune,type_evenement`,
+          // Variante ancien nom
+          `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-du-service-culturel-de-la-region-ile-de-france/records?limit=20&select=nom,date_debut,commune,type_evenement`,
+        ];
+        for (const idfUrl of idfUrls) {
+          const ctrl3 = new AbortController();
+          const t3    = setTimeout(() => ctrl3.abort(), 8000);
+          const r3    = await fetch(idfUrl, { signal: ctrl3.signal, headers: { 'Accept': 'application/json' } });
+          clearTimeout(t3);
+          if (r3.ok) {
+            const d3 = await r3.json();
+            if (d3.results?.length >= 1) {
+              results = d3.results.map(ev => ({
+                title:        ev.nom || 'Événement IDF',
+                date_start:   ev.date_debut?.split('T')[0] || today,
+                address_name: ev.commune || 'Île-de-France',
+                tags:         ev.type_evenement || '',
+              }));
+              console.log('[Events] IDF OK:', results.length);
+              break;
+            }
           }
         }
       } catch(e3) { console.warn('[Events] IDF:', e3.message); }
+    }
+
+    // ── Source 3 : OpenAgenda public sans authentification (agenda Ville de Paris) ──
+    // NOTE: openagenda.com requiert une clé API pour /v2/events — on utilise l'embed public
+    if (!results) {
+      try {
+        // Format public RSS d'OpenAgenda (pas besoin de clé)
+        const oaUrl = `https://openagenda.com/ville-de-paris/events.json?limit=20&oaq%5Bpassed%5D=0`;
+        const ctrl4 = new AbortController();
+        const t4    = setTimeout(() => ctrl4.abort(), 8000);
+        const r4    = await fetch(oaUrl, { signal: ctrl4.signal });
+        clearTimeout(t4);
+        if (r4.ok) {
+          const d4 = await r4.json();
+          const evts = d4.events || d4.items || [];
+          if (evts.length >= 1) {
+            results = evts.map(ev => ({
+              title:        ev.title?.fr || ev.title || 'Événement Paris',
+              date_start:   ev.firstTiming?.begin?.split('T')[0] || today,
+              address_name: ev.location?.name || 'Paris',
+              tags:         '',
+            }));
+            console.log('[Events] OpenAgenda JSON OK:', results.length);
+          }
+        }
+      } catch(e4) { console.warn('[Events] OpenAgenda:', e4.message); }
     }
 
     if (!results) throw new Error('Toutes les sources événements indisponibles');
@@ -1088,21 +1104,25 @@ window.loadEvents = async function(forceRefresh) {
       .map(ev => ({ ...ev, _impact: getEventImpact(ev) }))
       .sort((a, b) => b._impact.score - a._impact.score);
 
-    setLS('wob_events', JSON.stringify(sorted));
-    setLS('wob_events_ts', Date.now().toString());
+    ls('wob_events', JSON.stringify(sorted));
+    ls('wob_events_ts', Date.now().toString());
     renderEvents(sorted);
 
   } catch(e) {
-    console.warn('[Events]', e.message);
-    if (cache) {
+    console.warn('[Events] Toutes sources échouées:', e.message);
+    const cache2 = ls('wob_events');
+    if (cache2) {
       const ageH = Math.round(cacheAge / 3600000);
-      renderEvents(JSON.parse(cache));
-      if (ageH > 1) el.insertAdjacentHTML('afterbegin', `<div class="list-item warn" style="font-size:11px;">Hors-ligne · Cache : ${ageH}h</div>`);
+      renderEvents(JSON.parse(cache2));
+      el.insertAdjacentHTML('afterbegin',
+        `<div class="list-item warn" style="font-size:11px;border-radius:8px;margin-bottom:8px;">📡 Cache (${ageH}h) — Actualisez pour les derniers événements</div>`);
     } else {
       renderEventsFallback(el);
     }
   }
 };
+
+    const sorted2 = null; // nettoyage bloc orphelin supprimé
 
 function getEventImpact(ev) {
   const txt = ((ev.title||'')+(ev.tags||'')+(ev.address_name||'')).toLowerCase();
