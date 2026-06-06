@@ -23,7 +23,11 @@ const WOB_CONFIG = {
   // TomTom Traffic — https://developer.tomtom.com (2500 req/jour gratuit)
   TOMTOM_KEY: 'rLeU77arHeM5CXEUmuEF8fN7Up9I9Awk',
 
-  // Navitia — https://navitia.io (gratuit sur inscription)
+  // IDFM PRIM — https://prim.iledefrance-mobilites.fr (votre clé IDF Mobilités)
+  // Remplacez par votre clé PRIM IDF Mobilités (format: ex. "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+  IDFM_KEY: 'VOTRE_CLE_IDFM_PRIM',   // ← collez ici votre clé IDF Mobilités
+
+  // Navitia legacy (désactivé — clé expirée, remplacé par PRIM IDFM ci-dessus)
   NAVITIA_KEY: 'tmvRLg8J6MvXpjTFKOuqxwlIJ7oMtFtt',
 
   // Supabase — clés intégrées
@@ -94,7 +98,7 @@ function showToastAPI(msg) { if (typeof showToast === 'function') showToast(msg)
 
 // Vérifier si une clé API est configurée (non placeholder)
 function isKeySet(key) {
-  return key && key.length > 10 && !key.startsWith('VOTRE_');
+  return key && key.length > 10 && !key.startsWith('VOTRE_') && !key.includes('VOTRE_CLE') && key !== 'undefined' && key !== 'null';
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -382,7 +386,7 @@ const TRAFFIC = {
     if (cached) { this.renderSytadin(cached); return cached; }
     try {
       // API Open Data IDF Mobilités — données trafic agrégées
-      const url = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/etat-du-reseau-routier-en-ile-de-france/records?limit=20&order_by=date_debut desc';
+      const url = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/etat-du-reseau-routier-en-ile-de-france/records?limit=20&order_by=date_debut%20desc';
       const resp = await fetch(url, { signal: AbortSignal.timeout(10000), headers: { 'Accept': 'application/json' } });
       if (!resp.ok) throw new Error(`Sytadin HTTP ${resp.status}`);
       const data = await resp.json();
@@ -597,22 +601,38 @@ const NAVITIA = {
     const cached = getCached('wob_navitia', WOB_CONFIG.CACHE_TTL.navitia);
     if (cached) { this.render(cached); return; }
 
-    if (!isKeySet(WOB_CONFIG.NAVITIA_KEY)) {
+    // Priorité : PRIM IDF Mobilités (clé fournie par l'utilisateur)
+    const usePRIM = isKeySet(WOB_CONFIG.IDFM_KEY);
+    // Fallback : Navitia legacy si toujours valide
+    const useNavitia = !usePRIM && isKeySet(WOB_CONFIG.NAVITIA_KEY);
+
+    if (!usePRIM && !useNavitia) {
       this.renderNoKey();
       return;
     }
 
     try {
-      // Navitia: perturbations réseau IDF (1 seule requête)
-      const url = 'https://api.navitia.io/v1/coverage/fr-idf/disruptions?count=50&depth=1';
-      const resp = await fetch(url, {
-        signal: AbortSignal.timeout(10000),
-        headers: {
+      let url, headers;
+
+      if (usePRIM) {
+        // PRIM IDF Mobilités — perturbations TC Île-de-France
+        // Doc: https://prim.iledefrance-mobilites.fr/fr/apis/disruptions
+        url = 'https://prim.iledefrance-mobilites.fr/marketplace/navitia/coverage/fr-idf/disruptions?count=50&depth=1';
+        headers = {
+          'apikey': WOB_CONFIG.IDFM_KEY,
+          'Accept': 'application/json',
+        };
+      } else {
+        // Navitia legacy fallback
+        url = 'https://api.navitia.io/v1/coverage/fr-idf/disruptions?count=50&depth=1';
+        headers = {
           'Authorization': WOB_CONFIG.NAVITIA_KEY,
           'Accept': 'application/json',
-        },
-      });
-      if (!resp.ok) throw new Error(`Navitia HTTP ${resp.status}`);
+        };
+      }
+
+      const resp = await fetch(url, { signal: AbortSignal.timeout(10000), headers });
+      if (!resp.ok) throw new Error(`PRIM/Navitia HTTP ${resp.status}${resp.status===401||resp.status===403?' — clé invalide ou non autorisée':''}`);
       const data = await resp.json();
       const disruptions = this.parseDisruptions(data.disruptions || []);
       setCache('wob_navitia', disruptions);
@@ -728,13 +748,16 @@ const NAVITIA = {
     cont.innerHTML = `
       <div class="list-item info" style="border-radius:10px;flex-direction:column;gap:4px;">
         <div style="font-weight:700;">🚇 Alertes Transports en Commun</div>
-        <div style="font-size:11px;">Inscrivez-vous gratuitement sur <strong>navitia.io</strong> et ajoutez votre clé dans <code>NAVITIA_KEY</code> pour recevoir les alertes RER/Métro en temps réel.</div>
+        <div style="font-size:11px;">
+          Ajoutez votre clé <strong>IDF Mobilités (PRIM)</strong> dans <code>WOB_CONFIG.IDFM_KEY</code> dans <code>api.js</code>.<br>
+          Obtenez votre clé gratuite sur <strong>prim.iledefrance-mobilites.fr</strong>
+        </div>
       </div>`;
   },
 
   renderError() {
     const cont = el('navitia-container'); if (!cont) return;
-    cont.innerHTML = `<div class="list-item warn" style="border-radius:10px;font-size:11px;">🚇 Données transports indisponibles — Vérifiez votre clé Navitia</div>`;
+    cont.innerHTML = `<div class="list-item warn" style="border-radius:10px;font-size:11px;">🚇 Transports indisponibles — Vérifiez votre clé IDFM PRIM dans api.js → IDFM_KEY</div>`;
   },
 };
 
@@ -801,12 +824,12 @@ const AVIATION = {
     // Dataset: vols-en-temps-reel (CDG + Orly)
     const adpUrls = [
       // URL principale Open Data ADP
-      `https://opendata.aeroportsde paris.fr/api/explore/v2.1/catalog/datasets/vols-en-temps-reel/records`
+      `https://opendata.aeroportsde-paris.fr/api/explore/v2.1/catalog/datasets/vols-en-temps-reel/records`
         + `?where=${encodeURIComponent(`apt_iata="${airportCode}" AND mvt_type="${direction}" AND std>="${from}" AND std<="${to}"`)}`
         + `&limit=20&select=airline_code,flight_num,origin_dest_iata,std,sta,delay_minutes,status,terminal`
         + `&order_by=std asc`,
       // Variante sans filtrage temporel strict
-      `https://opendata.aeroportsde paris.fr/api/explore/v2.1/catalog/datasets/vols-en-temps-reel/records`
+      `https://opendata.aeroportsde-paris.fr/api/explore/v2.1/catalog/datasets/vols-en-temps-reel/records`
         + `?where=${encodeURIComponent(`apt_iata="${airportCode}" AND mvt_type="${direction}"`)}`
         + `&limit=15&select=airline_code,flight_num,origin_dest_iata,std,sta,delay_minutes,status,terminal`
         + `&order_by=std asc`,
@@ -1097,7 +1120,15 @@ const NOTIFS = {
 // ═══════════════════════════════════════════════════════════════════
 const SUPA = {
   isConfigured() {
-    return !!(WOB_CONFIG.SUPABASE_URL?.startsWith('https://') && WOB_CONFIG.SUPABASE_KEY?.length > 10);
+    const key = WOB_CONFIG.SUPABASE_KEY || '';
+    const url = WOB_CONFIG.SUPABASE_URL || '';
+    // Vérifier: la clé anon Supabase est un JWT (commence par "eyJ")
+    // "sb_publishable_" est un format de clé client Supabase JS SDK v2, pas pour l'API REST
+    const isValidKey = key.length > 20 && (key.startsWith('eyJ') || key.startsWith('sb_'));
+    if (key.startsWith('sb_publishable') && !key.startsWith('eyJ')) {
+      console.warn("[WOD] Supabase: cle sb_publishable incompatible avec REST API directe. Utilisez la cle anon public (JWT eyJ...) depuis Settings->API dans votre dashboard Supabase.");
+    }
+    return !!(url.startsWith('https://') && isValidKey);
   },
   headers() {
     return { 'Content-Type':'application/json', 'apikey':WOB_CONFIG.SUPABASE_KEY, 'Authorization':`Bearer ${WOB_CONFIG.SUPABASE_KEY}` };
