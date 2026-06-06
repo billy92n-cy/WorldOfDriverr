@@ -968,8 +968,13 @@ const DHIKR = {
 
   _injectWidget() {
     if (document.getElementById('dhikr-widget')) return;
-    const homeScroll = document.querySelector('#screen-home .screen-scroll');
-    if (!homeScroll) return;
+    // Widget Dhikr injecté dans screen-muslim (par wod-muslim.js)
+    const muslimScroll = document.querySelector('#screen-muslim .screen-scroll');
+    if (!muslimScroll) {
+      // Retry si le screen muslim n'est pas encore injecté
+      setTimeout(() => this._injectWidget(), 500);
+      return;
+    }
 
     const widget = document.createElement('div');
     widget.id = 'dhikr-widget';
@@ -1002,11 +1007,10 @@ const DHIKR = {
       </div>
     `;
 
-    const iaCard = homeScroll.querySelector('.ia-card');
-    const iaZones = document.getElementById('ia-zones-container');
-    const ref = iaZones ? iaZones.closest('.card') : iaCard;
-    if (ref) ref.after(widget);
-    else homeScroll.appendChild(widget);
+    // Insérer le widget Dhikr en haut de l'onglet Muslim (après bismi)
+    const bismi = muslimScroll.querySelector('.msl-bismi');
+    if (bismi) bismi.insertAdjacentElement('afterend', widget);
+    else muslimScroll.insertBefore(widget, muslimScroll.firstChild);
   },
 
   _injectCelebration() {
@@ -1207,19 +1211,40 @@ async function initWODSignature() {
     el.style.background = 'transparent';
   });
 
-  // Dhikr — attendre que l'app soit visible
+  // Dhikr — attendre que l'app soit visible ET que screen-muslim soit injecté
   const tryInitDhikr = () => {
-    if (!document.getElementById('app')?.classList.contains('hidden')) {
-      setTimeout(() => { DHIKR.init(); WOD_IMG.applyToAll(); }, 400);
-    } else {
+    const appVisible = !document.getElementById('app')?.classList.contains('hidden');
+    const muslimExists = !!document.getElementById('screen-muslim');
+
+    if (appVisible && muslimExists) {
+      setTimeout(() => { DHIKR.init(); WOD_IMG.applyToAll(); }, 200);
+    } else if (!appVisible) {
+      // Attendre que l'app soit visible
       const obs = new MutationObserver(() => {
         if (!document.getElementById('app')?.classList.contains('hidden')) {
           obs.disconnect();
-          setTimeout(() => { DHIKR.init(); WOD_IMG.applyToAll(); }, 400);
+          // screen-muslim peut ne pas encore exister → attendre encore
+          const waitMuslim = setInterval(() => {
+            if (document.getElementById('screen-muslim')) {
+              clearInterval(waitMuslim);
+              setTimeout(() => { DHIKR.init(); WOD_IMG.applyToAll(); }, 200);
+            }
+          }, 150);
+          // Timeout sécurité 5s
+          setTimeout(() => clearInterval(waitMuslim), 5000);
         }
       });
       const app = document.getElementById('app');
       if (app) obs.observe(app, { attributes:true, attributeFilter:['class'] });
+    } else {
+      // App visible mais screen-muslim pas encore là — attendre
+      const waitMuslim = setInterval(() => {
+        if (document.getElementById('screen-muslim')) {
+          clearInterval(waitMuslim);
+          setTimeout(() => { DHIKR.init(); WOD_IMG.applyToAll(); }, 200);
+        }
+      }, 150);
+      setTimeout(() => clearInterval(waitMuslim), 5000);
     }
   };
   tryInitDhikr();

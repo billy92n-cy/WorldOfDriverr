@@ -52,8 +52,10 @@ const AdhanCalc = (() => {
            (Math.cos(lat * DEG) * Math.cos(dec * DEG))) / DEG;
   }
 
-  function toDate(jd, hour, tz) {
-    const d = new Date((jd - 2440587.5 + (hour + tz) / 24) * 86400000);
+  function toDate(jd, hour) {
+    // hour est en UTC (temps solaire). On crée un Date UTC pur.
+    // toLocaleTimeString applique automatiquement le fuseau local à l'affichage.
+    const d = new Date((jd - 2440587.5 + hour / 24) * 86400000);
     return d;
   }
 
@@ -71,12 +73,12 @@ const AdhanCalc = (() => {
       const ha_isha = hourAngle(lat, dec, -17);
 
       const times = {
-        Fajr:    ha_fajr ? toDate(jd, noon - ha_fajr / 15, tz) : null,
-        Sunrise: ha_rise ? toDate(jd, noon - ha_rise / 15, tz) : null,
-        Dhuhr:   toDate(jd, noon + 0.05, tz),
-        Asr:     ha_asr  ? toDate(jd, noon + ha_asr / 15, tz)  : null,
-        Maghrib: ha_sset ? toDate(jd, noon + ha_sset / 15, tz) : null,
-        Isha:    ha_isha ? toDate(jd, noon + ha_isha / 15, tz) : null,
+        Fajr:    ha_fajr ? toDate(jd, noon - ha_fajr / 15) : null,
+        Sunrise: ha_rise ? toDate(jd, noon - ha_rise / 15) : null,
+        Dhuhr:   toDate(jd, noon + 0.05),
+        Asr:     ha_asr  ? toDate(jd, noon + ha_asr / 15)  : null,
+        Maghrib: ha_sset ? toDate(jd, noon + ha_sset / 15) : null,
+        Isha:    ha_isha ? toDate(jd, noon + ha_isha / 15) : null,
       };
       return times;
     }
@@ -624,7 +626,10 @@ const PRAYERS = {
   },
 
   _getTimezone() {
-    return -new Date().getTimezoneOffset() / 60;
+    // Récupère le vrai décalage UTC actuel (gère DST automatiquement)
+    // Paris hiver = +1, Paris été = +2
+    const now = new Date();
+    return -now.getTimezoneOffset() / 60;
   },
 
   _calculate() {
@@ -632,7 +637,11 @@ const PRAYERS = {
     const lon = window.state?.pos?.lon || 2.3522;
     const now = new Date();
     const tz  = this._getTimezone();
-    this.times = AdhanCalc.calculate(lat, lon, now, tz);
+
+    // Calcul avec la bonne méthode : on force le calcul sur la date locale,
+    // pas UTC (important pour les fuseaux décalés de minuit)
+    const localDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    this.times = AdhanCalc.calculate(lat, lon, localDate, tz);
     this._renderTimes();
   },
 
