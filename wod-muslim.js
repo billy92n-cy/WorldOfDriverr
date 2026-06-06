@@ -39,56 +39,70 @@ const AdhanCalc = (() => {
     return { dec: d, eqt: EqT };
   }
 
+  // ─── Angle horaire ─────────────────────────────────────────────
+  // Formule correcte : cos(H) = (sin(a) - sin(lat)·sin(dec)) / (cos(lat)·cos(dec))
+  // a = altitude (négatif = sous l'horizon, ex: -0.833° pour lever/coucher)
   function hourAngle(lat, dec, angle) {
-    const num = Math.cos(angle * DEG) - Math.sin(lat * DEG) * Math.sin(dec * DEG);
+    const num = Math.sin(angle * DEG) - Math.sin(lat * DEG) * Math.sin(dec * DEG);
     const den = Math.cos(lat * DEG) * Math.cos(dec * DEG);
     if (Math.abs(num / den) > 1) return null;
     return Math.acos(num / den) / DEG;
   }
 
+  // ─── Angle pour Asr ────────────────────────────────────────────
   function asrAngle(lat, dec, shadow) {
     const target = Math.atan(1 / (shadow + Math.tan(Math.abs(lat - dec) * DEG)));
-    return Math.acos((Math.sin(target) - Math.sin(lat * DEG) * Math.sin(dec * DEG)) /
-           (Math.cos(lat * DEG) * Math.cos(dec * DEG))) / DEG;
+    const num = Math.sin(target) - Math.sin(lat * DEG) * Math.sin(dec * DEG);
+    const den = Math.cos(lat * DEG) * Math.cos(dec * DEG);
+    if (Math.abs(num / den) > 1) return null;
+    return Math.acos(num / den) / DEG;
   }
 
-  // Convertit une heure solaire (UTC) en objet Date local
-  // hour = heure en fraction décimale (ex: 13.5 = 13h30), exprimée en UTC solaire
+  // ─── Conversion heure solaire UTC → objet Date ─────────────────
+  // hourUTC est en heures décimales depuis minuit UTC du jour julien jd
   function toDate(jd, hourUTC) {
-    // On reconstruit la date à partir du Jour Julien + heure UTC
     const ms = (jd - 2440587.5) * 86400000 + hourUTC * 3600000;
     return new Date(ms);
   }
 
   return {
+    // Calcule les horaires pour lat/lon à la date locale donnée
     calculate(lat, lon, date) {
       const y = date.getFullYear(), m = date.getMonth() + 1, d = date.getDate();
       const jd = julianDay(y, m, d);
       const { dec, eqt } = sunPosition(jd);
 
-      // noon = heure solaire midi en UTC (heure décimale)
-      // lon/15 convertit la longitude en heures (fuseau solaire)
-      // eqt est l'équation du temps en heures
+      // Heure UTC du midi solaire
       const noon = 12 - lon / 15 - eqt;
 
-      // Angles d'horizon pour chaque prière
-      const ha_fajr = hourAngle(lat, dec, -18);     // Fajr : crépuscule astronomique 18°
-      const ha_rise = hourAngle(lat, dec, -0.833);  // Lever du soleil
-      const ha_asr  = asrAngle(lat, dec, 1);        // Asr : ombre = 1x taille objet
-      const ha_sset = hourAngle(lat, dec, -0.833);  // Coucher = Maghrib
-      const ha_isha = hourAngle(lat, dec, -17);     // Isha : crépuscule 17°
+      const ha_fajr = hourAngle(lat, dec, -18);
+      const ha_rise = hourAngle(lat, dec, -0.833);
+      const ha_asr  = asrAngle(lat, dec, 1);
+      const ha_sset = hourAngle(lat, dec, -0.833);
+      const ha_isha = hourAngle(lat, dec, -17);
 
-      // Toutes les heures sont calculées en UTC solaire puis converties en Date
-      // Le navigateur affiche ensuite l'heure locale automatiquement via toLocaleTimeString
-      const times = {
-        Fajr:    ha_fajr ? toDate(jd, noon - ha_fajr / 15) : null,
+      // Fallback 1/7 de nuit pour latitudes élevées en été (Fajr/Isha indéfinis)
+      let fajrDate, ishaDate;
+      if (ha_fajr && ha_isha) {
+        fajrDate = toDate(jd, noon - ha_fajr / 15);
+        ishaDate = toDate(jd, noon + ha_isha / 15);
+      } else {
+        // Calculer la durée de la nuit (coucher → lever) pour le fallback
+        const sunriseUTC = ha_rise ? noon - ha_rise / 15 : noon - 6;
+        const sunsetUTC  = ha_sset ? noon + ha_sset / 15 : noon + 6;
+        const nightDur   = 24 - (sunsetUTC - sunriseUTC);
+        fajrDate = toDate(jd, sunriseUTC - nightDur / 7);
+        ishaDate = toDate(jd, sunsetUTC  + nightDur / 7);
+      }
+
+      return {
+        Fajr:    fajrDate,
         Sunrise: ha_rise ? toDate(jd, noon - ha_rise / 15) : null,
         Dhuhr:   toDate(jd, noon + 0.05),
         Asr:     ha_asr  ? toDate(jd, noon + ha_asr  / 15) : null,
         Maghrib: ha_sset ? toDate(jd, noon + ha_sset / 15) : null,
-        Isha:    ha_isha ? toDate(jd, noon + ha_isha / 15) : null,
+        Isha:    ishaDate,
       };
-      return times;
     }
   };
 })();
@@ -492,26 +506,28 @@ const QIBLA = {
   },
 
   _startCompass() {
-    // La gestion de permission boussole est centralisée dans WOD_PERMISSIONS (onglet Profil)
-    // Ici on démarre l'écouteur uniquement si la permission est déjà accordée
-    const compassGranted = localStorage.getItem('wod_perm_compass') === '1';
-    const handler = (e) => {
-      const h = e.webkitCompassHeading ?? (e.alpha ? (360 - e.alpha) : null);
-      if (h === null) return;
-      this.deviceHeading = h;
-      this._updateNeedle();
-    };
+    // La permission boussole est gérée par WOD_PERMISSIONS (onglet Profil)
+    // Si déjà accordée (localStorage), l'écouteur sera démarré par restoreOnStartup()
+    // Sinon : rien à faire ici, l'utilisateur doit activer depuis Profil
+    const btn = document.getElementById('qibla-permission-btn');
+    if (btn) btn.style.display = 'none'; // bouton géré depuis Profil uniquement
 
-    if (compassGranted) {
-      window.addEventListener('deviceorientation', handler, true);
-      const btn = document.getElementById('qibla-permission-btn');
-      if (btn) btn.style.display = 'none';
-    } else if (typeof DeviceOrientationEvent !== 'undefined' &&
-               typeof DeviceOrientationEvent.requestPermission !== 'function') {
-      // Android/desktop : pas de permission requise
-      window.addEventListener('deviceorientation', handler, true);
+    // Android/navigateurs sans requestPermission : démarrer directement
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission !== 'function') {
+      // Pas de permission requise — démarrer et mémoriser
+      if (window.WOD_PERMISSIONS) {
+        localStorage.setItem('wod_perm_compass', '1');
+        window.WOD_PERMISSIONS._compassListening = false;
+        window.WOD_PERMISSIONS._startCompassListener();
+      } else {
+        // Fallback si WOD_PERMISSIONS pas encore prêt
+        window.addEventListener('deviceorientation', (e) => {
+          const h = e.webkitCompassHeading ?? (e.alpha ? (360 - e.alpha) : null);
+          if (h !== null) { this.deviceHeading = h; this._updateNeedle(); }
+        }, true);
+      }
     }
-    // iOS sans permission → le bouton dans Profil est affiché via WOD_PERMISSIONS
   },
 
   _updateNeedle() {
@@ -609,7 +625,7 @@ const QIBLA = {
 
       <button class="msl-perm-btn" id="qibla-permission-btn" style="display:none">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-        Autoriser la boussole → onglet Profil
+        Autoriser la boussole
       </button>
     `;
     scroll.appendChild(card);
@@ -640,8 +656,6 @@ const PRAYERS = {
     const lat = window.state?.pos?.lat || 48.8566;
     const lon = window.state?.pos?.lon || 2.3522;
     const now = new Date();
-
-    // On utilise la date locale du jour (sans heure) pour le calcul
     const localDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     this.times = AdhanCalc.calculate(lat, lon, localDate);
     this._renderTimes();
@@ -754,15 +768,26 @@ const PRAYERS = {
       <div class="prayer-grid" id="prayer-grid"></div>
 
       <div class="prayer-notif-row">
-        <div class="prayer-method-lbl" style="margin-top:4px;">Méthode Muslim World League · Paris — Rappels : onglet Profil ⚙️</div>
+        <button class="msl-perm-btn" id="prayer-notif-btn" onclick="PRAYERS._requestNotif()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          Activer les rappels
+        </button>
+        <div class="prayer-method-lbl">Méthode Muslim World League · Paris</div>
       </div>
     `;
     scroll.appendChild(card);
   },
 
   _requestNotif() {
-    // Géré depuis l'onglet Profil — cette méthode reste pour compatibilité
-    WOD_PERMISSIONS.requestNotif();
+    if (!('Notification' in window)) { alert("Notifications non supportées."); return; }
+    Notification.requestPermission().then(p => {
+      const btn = document.getElementById('prayer-notif-btn');
+      if (p === 'granted' && btn) {
+        btn.textContent = '✓ Rappels activés';
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
+      }
+    });
   }
 };
 window.PRAYERS = PRAYERS;
@@ -1328,22 +1353,25 @@ function initMuslimModule() {
     const app = document.getElementById('app');
     if (!app?.classList.contains('hidden')) {
       setTimeout(() => {
+        // 1. Permissions en premier (lit le localStorage)
+        WOD_PERMISSIONS.restoreOnStartup();
+        // 2. Modules qui dépendent des permissions
         QIBLA.init();
         PRAYERS.init();
         HADITH.init();
-        WOD_PERMISSIONS.injectProfilPanel();
-        WOD_PERMISSIONS.restoreOnStartup();
+        // 3. Panel profil (peut être injecté après)
+        setTimeout(() => WOD_PERMISSIONS.injectProfilPanel(), 300);
       }, 600);
     } else {
       const obs = new MutationObserver(() => {
         if (!app?.classList.contains('hidden')) {
           obs.disconnect();
           setTimeout(() => {
+            WOD_PERMISSIONS.restoreOnStartup();
             QIBLA.init();
             PRAYERS.init();
             HADITH.init();
-            WOD_PERMISSIONS.injectProfilPanel();
-            WOD_PERMISSIONS.restoreOnStartup();
+            setTimeout(() => WOD_PERMISSIONS.injectProfilPanel(), 300);
           }, 600);
         }
       });
@@ -1352,7 +1380,7 @@ function initMuslimModule() {
   };
   tryInit();
 
-  // Hook goTo pour recalculer si on revient sur l'onglet
+  // Hook goTo
   const _origGoTo = window.goTo;
   window.goTo = function(id) {
     _origGoTo(id);
@@ -1360,7 +1388,7 @@ function initMuslimModule() {
       setTimeout(() => { PRAYERS._calculate(); QIBLA._startGPS(); }, 200);
     }
     if (id === 'profil') {
-      setTimeout(() => WOD_PERMISSIONS.updateProfilUI(), 100);
+      setTimeout(() => WOD_PERMISSIONS.updateProfilUI(), 150);
     }
   };
 }
@@ -1373,38 +1401,32 @@ const WOD_PERMISSIONS = {
   LS_COMPASS: 'wod_perm_compass',
   LS_NOTIF:   'wod_perm_notif',
 
-  // ── Restaure les permissions au démarrage sans redemander ──
+  // Restaure les permissions au démarrage
   restoreOnStartup() {
-    // Notifications : si permission déjà accordée par le navigateur, pas besoin de redemander
-    if (Notification.permission === 'granted') {
+    // Notifications : si le navigateur a déjà accordé → mémoriser
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       localStorage.setItem(this.LS_NOTIF, '1');
     }
-    // Boussole iOS : si déjà accordée lors d'une session précédente, réactiver l'écouteur
-    const compassGranted = localStorage.getItem(this.LS_COMPASS) === '1';
-    if (compassGranted) {
+    // Boussole : si déjà accordée → réactiver l'écouteur directement
+    if (localStorage.getItem(this.LS_COMPASS) === '1') {
       this._startCompassListener();
     }
-    this.updateProfilUI();
   },
 
-  // ── Démarre l'écouteur boussole (appelé après permission) ──
+  // Démarre l'écouteur orientation (appelé après permission)
   _startCompassListener() {
+    if (this._compassListening) return;
+    this._compassListening = true;
     const handler = (e) => {
       const h = e.webkitCompassHeading ?? (e.alpha ? (360 - e.alpha) : null);
       if (h === null) return;
-      if (window.QIBLA) {
-        window.QIBLA.deviceHeading = h;
-        window.QIBLA._updateNeedle();
-      }
+      if (window.QIBLA) { window.QIBLA.deviceHeading = h; window.QIBLA._updateNeedle(); }
     };
-    window.removeEventListener('deviceorientation', handler, true);
     window.addEventListener('deviceorientation', handler, true);
-    // Masquer le bouton dans l'onglet Qibla s'il est visible
     const btn = document.getElementById('qibla-permission-btn');
     if (btn) btn.style.display = 'none';
   },
 
-  // ── Demander permission boussole ──
   async requestCompass() {
     if (typeof DeviceOrientationEvent !== 'undefined' &&
         typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -1412,6 +1434,7 @@ const WOD_PERMISSIONS = {
         const perm = await DeviceOrientationEvent.requestPermission();
         if (perm === 'granted') {
           localStorage.setItem(this.LS_COMPASS, '1');
+          this._compassListening = false; // reset pour re-attacher
           this._startCompassListener();
           this.updateProfilUI();
           if (typeof showToast === 'function') showToast('✅ Boussole activée');
@@ -1422,22 +1445,22 @@ const WOD_PERMISSIONS = {
         if (typeof showToast === 'function') showToast('⚠️ Erreur permission boussole');
       }
     } else {
-      // Android / non-iOS : accès direct sans permission
+      // Android/desktop : accès direct
       localStorage.setItem(this.LS_COMPASS, '1');
+      this._compassListening = false;
       this._startCompassListener();
       this.updateProfilUI();
       if (typeof showToast === 'function') showToast('✅ Boussole activée');
     }
   },
 
-  // ── Désactiver boussole ──
   revokeCompass() {
     localStorage.setItem(this.LS_COMPASS, '0');
+    this._compassListening = false;
     this.updateProfilUI();
     if (typeof showToast === 'function') showToast('Boussole désactivée');
   },
 
-  // ── Demander permission notifications ──
   async requestNotif() {
     if (!('Notification' in window)) {
       if (typeof showToast === 'function') showToast('⚠️ Notifications non supportées');
@@ -1452,52 +1475,39 @@ const WOD_PERMISSIONS = {
     const perm = await Notification.requestPermission();
     if (perm === 'granted') {
       localStorage.setItem(this.LS_NOTIF, '1');
-      this.updateProfilUI();
-      if (typeof showToast === 'function') showToast('✅ Rappels de prière activés');
     } else {
       localStorage.setItem(this.LS_NOTIF, '0');
-      this.updateProfilUI();
-      if (typeof showToast === 'function') showToast('⚠️ Notifications refusées dans les réglages');
     }
+    this.updateProfilUI();
+    if (typeof showToast === 'function') showToast(perm === 'granted' ? '✅ Rappels activés' : '⚠️ Refusé dans les réglages');
   },
 
-  // ── Désactiver notifications ──
   revokeNotif() {
     localStorage.setItem(this.LS_NOTIF, '0');
     this.updateProfilUI();
     if (typeof showToast === 'function') showToast('Rappels prière désactivés');
   },
 
-  // ── État actuel ──
-  isCompassOn() {
-    return localStorage.getItem(this.LS_COMPASS) === '1';
-  },
-  isNotifOn() {
-    return localStorage.getItem(this.LS_NOTIF) === '1' && Notification.permission === 'granted';
-  },
+  isCompassOn()  { return localStorage.getItem(this.LS_COMPASS) === '1'; },
+  isNotifOn()    { return localStorage.getItem(this.LS_NOTIF) === '1' && typeof Notification !== 'undefined' && Notification.permission === 'granted'; },
 
-  // ── Mettre à jour l'UI dans l'onglet Profil ──
   updateProfilUI() {
-    const compassToggle = document.getElementById('perm-compass-toggle');
-    const notifToggle   = document.getElementById('perm-notif-toggle');
-    const compassStatus = document.getElementById('perm-compass-status');
-    const notifStatus   = document.getElementById('perm-notif-status');
-
-    if (compassToggle) {
+    const ct = document.getElementById('perm-compass-toggle');
+    const nt = document.getElementById('perm-notif-toggle');
+    const cs = document.getElementById('perm-compass-status');
+    const ns = document.getElementById('perm-notif-status');
+    if (ct) {
       const on = this.isCompassOn();
-      compassToggle.classList.toggle('perm-on', on);
-      compassToggle.classList.toggle('perm-off', !on);
-      if (compassStatus) compassStatus.textContent = on ? 'Activée' : 'Désactivée';
+      ct.classList.toggle('perm-on', on); ct.classList.toggle('perm-off', !on);
+      if (cs) cs.textContent = on ? 'Activée' : 'Désactivée';
     }
-    if (notifToggle) {
+    if (nt) {
       const on = this.isNotifOn();
-      notifToggle.classList.toggle('perm-on', on);
-      notifToggle.classList.toggle('perm-off', !on);
-      if (notifStatus) notifStatus.textContent = on ? 'Activés' : 'Désactivés';
+      nt.classList.toggle('perm-on', on); nt.classList.toggle('perm-off', !on);
+      if (ns) ns.textContent = on ? 'Activés' : 'Désactivés';
     }
   },
 
-  // ── Injecter le panneau dans l'onglet Profil ──
   injectProfilPanel() {
     if (document.getElementById('wod-permissions-card')) return;
     const profilScroll = document.querySelector('#screen-profil .screen-scroll');
@@ -1513,93 +1523,49 @@ const WOD_PERMISSIONS = {
       </div>
       <div class="acc-body">
         <div style="display:flex;flex-direction:column;gap:14px;padding-top:4px;">
-
-          <!-- Boussole Qibla -->
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div>
               <div style="font-weight:700;font-size:.88rem;">🧭 Boussole Qibla</div>
-              <div style="font-size:.75rem;color:var(--text-dim);margin-top:2px;">
-                Orientation vers La Mecque · <span id="perm-compass-status">Désactivée</span>
-              </div>
+              <div style="font-size:.75rem;color:var(--text-dim);margin-top:2px;">Orientation vers La Mecque · <span id="perm-compass-status">Désactivée</span></div>
             </div>
-            <button id="perm-compass-toggle" class="perm-toggle perm-off"
-              onclick="WOD_PERMISSIONS._onCompassToggle()">
+            <button id="perm-compass-toggle" class="perm-toggle perm-off" onclick="WOD_PERMISSIONS._onCompassToggle()">
               <span class="perm-knob"></span>
             </button>
           </div>
-
-          <!-- Rappels Prière -->
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div>
               <div style="font-weight:700;font-size:.88rem;">🔔 Rappels de prière</div>
-              <div style="font-size:.75rem;color:var(--text-dim);margin-top:2px;">
-                Notification 5 min avant chaque prière · <span id="perm-notif-status">Désactivés</span>
-              </div>
+              <div style="font-size:.75rem;color:var(--text-dim);margin-top:2px;">Notification 5 min avant · <span id="perm-notif-status">Désactivés</span></div>
             </div>
-            <button id="perm-notif-toggle" class="perm-toggle perm-off"
-              onclick="WOD_PERMISSIONS._onNotifToggle()">
+            <button id="perm-notif-toggle" class="perm-toggle perm-off" onclick="WOD_PERMISSIONS._onNotifToggle()">
               <span class="perm-knob"></span>
             </button>
           </div>
-
         </div>
-      </div>
-    `;
+      </div>`;
 
-    // Insérer avant la card "Zone Danger"
     const dangerCard = profilScroll.querySelector('.card-danger');
     if (dangerCard) profilScroll.insertBefore(card, dangerCard);
     else profilScroll.appendChild(card);
 
-    // Injecter le CSS des toggles
     if (!document.getElementById('perm-toggle-css')) {
       const s = document.createElement('style');
       s.id = 'perm-toggle-css';
       s.textContent = `
-        .perm-toggle {
-          position: relative;
-          width: 50px; height: 28px;
-          border-radius: 14px;
-          border: none;
-          cursor: pointer;
-          transition: background 0.3s ease;
-          flex-shrink: 0;
-          outline: none;
-        }
-        .perm-toggle.perm-off {
-          background: rgba(255,255,255,0.12);
-        }
-        .perm-toggle.perm-on {
-          background: linear-gradient(135deg, #d4a843, #f5c257);
-          box-shadow: 0 0 12px rgba(212,168,67,0.5);
-        }
-        .perm-knob {
-          position: absolute;
-          top: 3px;
-          width: 22px; height: 22px;
-          background: #fff;
-          border-radius: 50%;
-          transition: left 0.3s cubic-bezier(.34,1.56,.64,1), box-shadow 0.3s;
-          box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-        }
-        .perm-toggle.perm-off .perm-knob { left: 3px; }
-        .perm-toggle.perm-on  .perm-knob { left: 25px; }
-      `;
+        .perm-toggle { position:relative; width:50px; height:28px; border-radius:14px; border:none; cursor:pointer; transition:background .3s; flex-shrink:0; outline:none; }
+        .perm-toggle.perm-off { background:rgba(255,255,255,0.12); }
+        .perm-toggle.perm-on  { background:linear-gradient(135deg,#d4a843,#f5c257); box-shadow:0 0 12px rgba(212,168,67,0.5); }
+        .perm-knob { position:absolute; top:3px; width:22px; height:22px; background:#fff; border-radius:50%; transition:left .3s cubic-bezier(.34,1.56,.64,1); box-shadow:0 2px 6px rgba(0,0,0,.3); }
+        .perm-toggle.perm-off .perm-knob { left:3px; }
+        .perm-toggle.perm-on  .perm-knob { left:25px; }`;
       document.head.appendChild(s);
     }
-
     this.updateProfilUI();
   },
 
-  _onCompassToggle() {
-    if (this.isCompassOn()) this.revokeCompass();
-    else this.requestCompass();
-  },
-
-  _onNotifToggle() {
-    if (this.isNotifOn()) this.revokeNotif();
-    else this.requestNotif();
-  },
+  _onCompassToggle() { this.isCompassOn() ? this.revokeCompass() : this.requestCompass(); },
+  _onNotifToggle()   { this.isNotifOn()   ? this.revokeNotif()   : this.requestNotif();  },
+  _compassListening: false,
 };
 window.WOD_PERMISSIONS = WOD_PERMISSIONS;
 

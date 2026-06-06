@@ -360,7 +360,9 @@ function restoreAlertDates() {
 }
 
 // ══════════════════════════════════════════════════
-//  CSV
+//  CSV — Import Bolt / Uber
+//  Chaque fichier = 1 mois complet de revenus
+//  Logique : additionner Prix TTC de chaque course = revenu mensuel
 // ══════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', () => {
   animateSplash();
@@ -374,141 +376,203 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function handleCSV(e) {
-  const files  = Array.from(e.target.files);
+  const files = Array.from(e.target.files);
   if (!files.length) return;
+
   let saved = JSON.parse(ls('wob_files') || '[]');
-  let gain = state.totalGain, km = state.totalKm, trips = state.totalTrips;
-  const pd = { ...state.platformData };
-  const hd = [...state.hourData];
-  const wd = [...state.weekdayData];
 
   for (const file of files) {
     if (saved.includes(file.name)) { showToast(`Déjà importé : ${file.name}`); continue; }
-    const res = await parseCSV(file);
-    gain += res.gain; km += res.km; trips += res.trips;
+
+    const res = await parseCSVBolt(file);
+
+    // Accumuler dans le state global
+    state.totalGain  += res.totalTTC;
+    state.totalKm    += res.totalKm;
+    state.totalTrips += res.trips;
+
+    // Plateformes
     const plat = detectPlatform(file.name);
-    pd[plat] = (pd[plat] || 0) + res.gain;
-    res.hours.forEach((v,i) => { hd[i] += v; });
-    res.weekdays.forEach((v,i) => { wd[i] += v; });
-    state.sessions.push(...res.sessions);
+    state.platformData[plat] = (state.platformData[plat] || 0) + res.totalTTC;
+
+    // Données horaires et journalières
+    res.sessions.forEach(s => {
+      if (s.hour !== undefined) state.hourData[s.hour] += s.ttc;
+      if (s.weekday !== undefined) state.weekdayData[s.weekday] += s.ttc;
+    });
+    state.sessions.push(...res.sessions.map(s => ({
+      gain: s.ttc,
+      km:   s.km || 0,
+      date: s.isoDate || null,
+    })));
+
     saved.push(file.name);
 
-    // Stocker les données mensuelles par fichier
+    // Stocker le résumé mensuel
     const monthly = JSON.parse(ls('wob_monthly') || '[]');
     monthly.push({
-      file: file.name,
-      platform: plat,
-      month: res.detectedMonth,   // ex: "Avril 2026"
-      gain: res.gain,
-      km: res.km,
-      trips: res.trips,
+      file:      file.name,
+      platform:  plat,
+      month:     res.monthLabel,
+      totalTTC:  res.totalTTC,
+      trips:     res.trips,
+      weeklyBreakdown: res.weeklyBreakdown,
     });
     setLS('wob_monthly', JSON.stringify(monthly));
 
+    // Afficher dans la liste
     const li = document.createElement('div');
     li.className = 'list-item ok';
-    const mLabel = res.detectedMonth ? ` · ${res.detectedMonth}` : '';
-    li.innerHTML = `${svgCheck()} ${file.name}${mLabel} — ${res.trips} courses · ${res.gain.toFixed(2)}€`;
+    li.innerHTML = `${svgCheck()} <strong>${res.monthLabel}</strong> — ${res.trips} courses · <strong>${res.totalTTC.toFixed(2)} €</strong>`;
     $('csv-files-list')?.appendChild(li);
+
+    // Détail semaines
+    if (Object.keys(res.weeklyBreakdown).length > 0) {
+      Object.entries(res.weeklyBreakdown).sort().forEach(([wk, val]) => {
+        const sub = document.createElement('div');
+        sub.className = 'list-item info';
+        sub.style.fontSize = '.75rem';
+        sub.style.marginLeft = '12px';
+        sub.innerHTML = `📅 ${wk} : ${val.toFixed(2)} €`;
+        $('csv-files-list')?.appendChild(sub);
+      });
+    }
   }
 
-  state.totalGain = gain; state.totalKm = km; state.totalTrips = trips;
-  state.platformData = pd; state.hourData = hd; state.weekdayData = wd;
-  setLS('wob_gain', gain); setLS('wob_km', km); setLS('wob_trips', trips);
-  setLS('wob_sessions', JSON.stringify(state.sessions));
-  setLS('wob_platforms', JSON.stringify(pd));
-  setLS('wob_hours', JSON.stringify(hd));
-  setLS('wob_weekday', JSON.stringify(wd));
-  setLS('wob_files', JSON.stringify(saved));
+  // Sauvegarder tout
+  setLS('wob_gain',      state.totalGain);
+  setLS('wob_km',        state.totalKm);
+  setLS('wob_trips',     state.totalTrips);
+  setLS('wob_sessions',  JSON.stringify(state.sessions));
+  setLS('wob_platforms', JSON.stringify(state.platformData));
+  setLS('wob_hours',     JSON.stringify(state.hourData));
+  setLS('wob_weekday',   JSON.stringify(state.weekdayData));
+  setLS('wob_files',     JSON.stringify(saved));
 
   updateDashboard();
   await generateIAReport();
   showToast('Import réussi !');
 }
 
-function parseCSV(file) {
+// ── Parse CSV Bolt (et Uber) ──────────────────────────────────
+// Logique : chaque ligne = 1 course → additionner Prix TTC = revenu mensuel
+function parseCSVBolt(file) {
   return new Promise(resolve => {
     Papa.parse(file, {
-      header:true, dynamicTyping:false, skipEmptyLines:true,
+      header: true,
+      dynamicTyping: false,
+      skipEmptyLines: true,
       complete: res => {
         const rows = res.data;
-        let gain=0, km=0, trips=0;
-        const hours   = new Array(24).fill(0);
-        const weekdays= new Array(7).fill(0);
-        const sessions= [];
-        const GC = ['Prix TTC','Fare','Total','Earnings','Amount','Montant','Prix','Revenue','Gain'];
-        const KC = ['Distance (km)','Distance','Trip Distance','Kilometers','km','distance_km'];
-        const DC = ['Date du trajet','Date','date','datetime','pickup_datetime','heure','Heure','Pickup time'];
+        const MONTHS_FR = ['Janvier','Février','Mars','Avril','Mai','Juin',
+                           'Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
 
-        // Pour détecter le mois dominant du fichier
+        // Colonnes Prix TTC — Bolt utilise "Prix TTC", Uber "Fare" etc.
+        const TTC_COLS = ['Prix TTC','Fare','Total','Earnings','Amount','Montant','Prix','Revenue','Gain'];
+        // Colonnes date trajet
+        const DATE_COLS = ['Date du trajet','Date','date','datetime','pickup_datetime','heure','Heure','Pickup time'];
+        // Colonnes km (souvent absentes chez Bolt)
+        const KM_COLS = ['Distance (km)','Distance','Trip Distance','Kilometers','km','distance_km'];
+
+        let totalTTC = 0;
+        let totalKm  = 0;
+        let trips    = 0;
+        const sessions = [];
+        const weeklyBreakdown = {}; // "Semaine 1 (31/03 – 06/04)": 543.60
         const monthCount = {};
 
         rows.forEach(row => {
-          let g=0, k=0;
-          for (const c of GC) {
-            if (row[c] !== undefined && row[c] !== null && row[c] !== '') {
-              const v = parseFloat(String(row[c]).replace(',','.').replace(/[^\d.]/g,''));
-              if (!isNaN(v) && v > 0) { g = v; break; }
+          // Lire Prix TTC
+          let ttc = 0;
+          for (const col of TTC_COLS) {
+            const v = row[col];
+            if (v !== undefined && v !== null && v !== '') {
+              const n = parseFloat(String(v).replace(',', '.').replace(/[^\d.]/g, ''));
+              if (!isNaN(n) && n > 0) { ttc = n; break; }
             }
           }
-          for (const c of KC) {
-            if (row[c] !== undefined && row[c] !== null && row[c] !== '') {
-              const v = parseFloat(String(row[c]).replace(',','.'));
-              if (!isNaN(v) && v > 0) { k = v; break; }
+          if (ttc <= 0) return; // ligne invalide
+
+          // Lire km (optionnel)
+          let km = 0;
+          for (const col of KM_COLS) {
+            const v = row[col];
+            if (v !== undefined && v !== null && v !== '') {
+              const n = parseFloat(String(v).replace(',', '.'));
+              if (!isNaN(n) && n > 0) { km = n; break; }
             }
           }
-          if (g > 0) {
-            gain += g; km += k; trips++;
-            for (const c of DC) {
-              if (row[c]) {
-                let d;
-                const raw = String(row[c]).trim();
-                const boltMatch = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
-                if (boltMatch) {
-                  d = new Date(`${boltMatch[3]}-${boltMatch[2]}-${boltMatch[1]}T${boltMatch[4]}:${boltMatch[5]}:00`);
-                } else {
-                  d = new Date(raw);
-                }
-                if (!isNaN(d.getTime())) {
-                  hours[d.getHours()] += g;
-                  weekdays[d.getDay()] += g;
-                  sessions.push({ gain: g, km: k, date: d.toISOString() });
-                  // Compter les mois présents dans le fichier
-                  const mKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-                  monthCount[mKey] = (monthCount[mKey] || 0) + 1;
-                  break;
-                }
+
+          totalTTC += ttc;
+          totalKm  += km;
+          trips++;
+
+          // Lire date
+          let dateObj = null;
+          for (const col of DATE_COLS) {
+            const raw = row[col];
+            if (raw) {
+              const s = String(raw).trim();
+              // Format Bolt : "30.04.2026 21:01"
+              const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+              if (m) {
+                dateObj = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]||'12'}:${m[5]||'00'}:00`);
+              } else {
+                const d = new Date(s);
+                if (!isNaN(d.getTime())) dateObj = d;
               }
-            }
-            if (!sessions.length || sessions[sessions.length-1].gain !== g) {
-              sessions.push({ gain: g, km: k });
+              if (dateObj && !isNaN(dateObj.getTime())) break;
             }
           }
+
+          const sess = { ttc, km };
+          if (dateObj && !isNaN(dateObj.getTime())) {
+            sess.isoDate = dateObj.toISOString();
+            sess.hour    = dateObj.getHours();
+            sess.weekday = dateObj.getDay();
+
+            // Mois dominant
+            const mKey = `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}`;
+            monthCount[mKey] = (monthCount[mKey] || 0) + 1;
+
+            // Semaine calendaire ISO
+            const wkNum  = getISOWeek(dateObj);
+            const wkYear = dateObj.getFullYear();
+            const wkKey  = `Semaine ${wkNum} (${wkYear})`;
+            weeklyBreakdown[wkKey] = (weeklyBreakdown[wkKey] || 0) + ttc;
+          }
+          sessions.push(sess);
         });
 
-        // Détecter le mois dominant (le plus représenté dans le fichier)
-        let detectedMonth = null;
-        const MONTHS_FR = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+        // Déterminer le mois dominant
+        let monthLabel = 'Mois inconnu';
         if (Object.keys(monthCount).length > 0) {
           const dominant = Object.entries(monthCount).sort((a,b) => b[1]-a[1])[0][0];
           const [yr, mo] = dominant.split('-');
-          detectedMonth = `${MONTHS_FR[parseInt(mo)-1]} ${yr}`;
+          monthLabel = `${MONTHS_FR[parseInt(mo)-1]} ${yr}`;
         } else {
-          // Fallback : détecter depuis le nom du fichier
-          const fname = file.name.toLowerCase();
-          const mMatch = fname.match(/(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)/i);
-          const yMatch = fname.match(/20\d{2}/);
-          if (mMatch) {
-            const mIdx = MONTHS_FR.findIndex(m => m.toLowerCase() === mMatch[1].toLowerCase());
-            detectedMonth = `${MONTHS_FR[mIdx >= 0 ? mIdx : 0]} ${yMatch ? yMatch[0] : new Date().getFullYear()}`;
+          // Fallback : nom du fichier
+          const fn = file.name.toLowerCase();
+          const found = MONTHS_FR.find(m => fn.includes(m.toLowerCase()));
+          if (found) {
+            const yMatch = file.name.match(/20\d{2}/);
+            monthLabel = `${found}${yMatch ? ' '+yMatch[0] : ''}`;
           }
         }
 
-        resolve({ gain, km, trips, hours, weekdays, sessions, detectedMonth });
+        resolve({ totalTTC, totalKm, trips, sessions, monthLabel, weeklyBreakdown });
       },
-      error: () => resolve({ gain:0, km:0, trips:0, hours:new Array(24).fill(0), weekdays:new Array(7).fill(0), sessions:[], detectedMonth:null })
+      error: () => resolve({ totalTTC:0, totalKm:0, trips:0, sessions:[], monthLabel:'Erreur', weeklyBreakdown:{} })
     });
   });
+}
+
+// Numéro de semaine ISO 8601
+function getISOWeek(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
 }
 
 function detectPlatform(name) {
@@ -626,69 +690,70 @@ window.generateIAReport = async function() {
   dotEl?.classList.add('active');
   iaEl.textContent = 'Analyse en cours...';
 
-  const conso   = parseFloat(ls('wob_conso')) || 6.5;
-  const prix    = parseFloat(ls('wob_prix'))  || 1.85;
-  const fuel    = state.totalKm * (conso/100) * prix;
-  const totalDep= state.depenses.reduce((s,d) => s+d.montant, 0);
-  const net     = state.totalGain - fuel - totalDep;
-  const ratio   = state.totalKm > 0 ? net/state.totalKm : 0;
-  const avg     = state.totalTrips > 0 ? state.totalGain/state.totalTrips : 0;
+  const conso    = parseFloat(ls('wob_conso')) || 6.5;
+  const prixCarb = parseFloat(ls('wob_prix'))  || 1.85;
+  const fuel     = state.totalKm * (conso / 100) * prixCarb;
+  const totalDep = state.depenses.reduce((s, d) => s + d.montant, 0);
+  const net      = state.totalGain - fuel - totalDep;
+  const ratio    = state.totalKm > 0 ? net / state.totalKm : 0;
+  const avg      = state.totalTrips > 0 ? state.totalGain / state.totalTrips : 0;
 
-  // Récupérer les données mensuelles pour contexte précis
-  const monthly = JSON.parse(ls('wob_monthly') || '[]');
+  // Données mensuelles
+  const monthly  = JSON.parse(ls('wob_monthly') || '[]');
   const nbMonths = monthly.length;
 
-  // Construire le résumé mensuel pour le prompt
-  let monthlyContext = '';
-  if (nbMonths > 0) {
-    monthlyContext = monthly.map(m =>
-      `  • ${m.month || m.file} (${m.platform}) : ${m.gain.toFixed(2)}€ bruts · ${m.trips} courses · ${m.km.toFixed(0)} km`
-    ).join('\n');
-  }
+  // Construire le résumé pour l'IA
+  let monthlyLines = '';
+  monthly.forEach(m => {
+    monthlyLines += `\n• ${m.month} (${m.platform}) : ${m.totalTTC?.toFixed(2) || m.gain?.toFixed(2) || '?'}€ bruts · ${m.trips} courses`;
+    if (m.weeklyBreakdown && Object.keys(m.weeklyBreakdown).length > 0) {
+      Object.entries(m.weeklyBreakdown).sort().forEach(([wk, val]) => {
+        monthlyLines += `\n    - ${wk} : ${val.toFixed(2)}€`;
+      });
+    }
+  });
 
-  const prompt = `Tu es un assistant expert VTC. Analyse ces données de chauffeur et génère un rapport concis en 3-4 phrases en français avec des conseils actionnables.
+  const prompt = `Tu es un assistant expert VTC. Génère une analyse concise en français (3-5 phrases + conseils).
 
-RÈGLE IMPORTANTE : Chaque fichier CSV importé représente UN SEUL mois complet d'activité (pas une année). Les gains mensuels ci-dessous sont les revenus de chaque mois séparé. Ne jamais les interpréter comme des données annuelles.
+RÈGLE ABSOLUE : chaque fichier CSV = UN mois complet. Le revenu mensuel = somme de TOUS les Prix TTC des courses de ce mois. Ne jamais extrapoler annuellement à partir d'un seul mois.
 
-Détail par mois importé (${nbMonths} mois) :
-${monthlyContext || '  • Données sans mois détecté'}
+Données par mois importé (${nbMonths} mois) :${monthlyLines || '\n• Pas de détail mensuel disponible'}
 
-Totaux cumulés sur ${nbMonths} mois :
-- Gains bruts cumulés : ${state.totalGain.toFixed(2)}€
-- Distance cumulée : ${state.totalKm.toFixed(1)} km
-- Courses cumulées : ${state.totalTrips}
+Totaux cumulés (${nbMonths} mois confondus) :
+- Gains bruts : ${state.totalGain.toFixed(2)}€
+- Courses : ${state.totalTrips}
+- Distance : ${state.totalKm.toFixed(0)} km${state.totalKm > 0 ? '' : ' (non renseignée)'}
 - Carburant estimé : ${fuel.toFixed(2)}€
 - Dépenses pro : ${totalDep.toFixed(2)}€
-- Bénéfice net : ${net.toFixed(2)}€
-- Ratio net/km : ${ratio.toFixed(2)}€/km
-- Moyenne par course : ${avg.toFixed(2)}€
-- Type véhicule : ${ls('wob_veh_type') || 'essence'}
+- Bénéfice net estimé : ${net.toFixed(2)}€
+- Moyenne par course : ${avg.toFixed(2)}€/course
+- Véhicule : ${ls('wob_veh_type') || 'essence'}
 
-Fournis : analyse de rentabilité mensuelle, comparaison entre les mois si plusieurs, points forts/faibles, 2 conseils concrets.`;
+Fournis : performance mensuelle, comparaison des semaines si disponible, 2 conseils concrets pour optimiser les revenus.`;
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model:'claude-sonnet-4-20250514',
-        max_tokens:1000,
-        messages:[{ role:'user', content:prompt }]
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }]
       })
     });
     if (!resp.ok) throw new Error(`API ${resp.status}`);
     const data = await resp.json();
-    const text = data.content?.map(c=>c.text||'').join('') || '';
+    const text = data.content?.map(c => c.text || '').join('') || '';
     iaEl.textContent = text;
     setLS('wob_ia', text);
   } catch {
-    let emoji, analyse, conseil;
-    if (ratio >= 0.8)      { emoji=''; analyse='Excellente rentabilité'; conseil='Maintenez ces créneaux et zones.'; }
-    else if (ratio >= 0.5) { emoji=''; analyse='Bonne performance'; conseil='Privilégiez vendredi/samedi soir.'; }
-    else if (ratio >= 0.3) { emoji=''; analyse='Performance correcte'; conseil='Réduisez les km à vide.'; }
-    else                   { emoji=''; analyse='Rentabilité à améliorer'; conseil='Ciblez CDG/Orly pour de longues courses.'; }
-    const mLabel = nbMonths > 0 ? ` (${nbMonths} mois)` : '';
-    const txt = `${emoji} ${analyse}${mLabel} — Net : ${net.toFixed(2)}€ · ${ratio.toFixed(2)}€/km. ${conseil}`;
+    // Fallback local
+    const bestMonth = monthly.length > 0
+      ? monthly.reduce((a, b) => ((a.totalTTC||a.gain||0) > (b.totalTTC||b.gain||0) ? a : b))
+      : null;
+    const txt = `📊 ${nbMonths} mois importé(s) · ${state.totalTrips} courses · ${state.totalGain.toFixed(2)}€ bruts.`
+      + (bestMonth ? ` Meilleur mois : ${bestMonth.month} (${(bestMonth.totalTTC||bestMonth.gain||0).toFixed(2)}€).` : '')
+      + ` Moyenne : ${avg.toFixed(2)}€/course. Optimisez vos créneaux CDG/Orly pour augmenter la moyenne.`;
     iaEl.textContent = txt;
     setLS('wob_ia', txt);
   } finally {
@@ -889,21 +954,14 @@ window.loadTraffic = async function() {
   IDF_ZONES.forEach((z,i) => {
     const r = results[i];
     if (r) {
-      const hasTomTom = r.source === 'tomtom';
-      const delayBadge = (hasTomTom && r.delayMin > 2)
-        ? `<span style="font-size:.65rem;color:#ff4d6a;font-weight:700;">+${r.delayMin}min 🚦</span>`
-        : '';
-      const srcBadge = hasTomTom
-        ? `<span style="font-size:.6rem;color:var(--gold);opacity:.7;">● TomTom live</span>`
-        : `<span style="font-size:.6rem;color:var(--text-dim);opacity:.6;">○ estimé</span>`;
       html += `<div class="list-item ${r.cls}" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <div>
-          <div style="font-weight:700;font-size:.82rem">${z.nom} ${srcBadge}</div>
+          <div style="font-weight:700;font-size:.82rem">${z.nom}</div>
           <div style="font-size:.7rem;opacity:.8">${r.congestion}</div>
           ${r.tip ? `<div style="font-size:.68rem;color:var(--gold)">${r.tip}</div>` : ''}
         </div>
         <div style="text-align:right;font-weight:700;white-space:nowrap">
-          <div>${r.mins} min ${delayBadge}</div>
+          <div>${r.mins} min</div>
           <div style="font-size:.72rem;opacity:.8">${r.km} km</div>
         </div>
       </div>`;
@@ -916,66 +974,7 @@ window.loadTraffic = async function() {
   window._trafficTimer = setTimeout(loadTraffic, 5*60*1000);
 };
 
-// ── Clé TomTom partagée avec api.js (injectée directement) ──
-const _TOMTOM_KEY = 'rLeU77arHeM5CXEUmuEF8fN7Up9I9Awk';
-
 async function fetchRoute(zone) {
-  // Essai 1 : TomTom Routing API avec trafic temps réel (embouteillages inclus)
-  try {
-    const from = `${state.pos.lat},${state.pos.lon}`;
-    const to   = `${zone.lat},${zone.lon}`;
-    const cacheKey = `wod_rt_${from}_${to}`.replace(/[,.]/g,'_');
-    // Cache 10 min pour le widget principal (plus frais que api.js qui cache 20min)
-    const cached = (() => {
-      try {
-        const v = localStorage.getItem(cacheKey);
-        const ts = parseInt(localStorage.getItem(cacheKey+'_ts')||'0');
-        if (v && Date.now()-ts < 10*60*1000) return JSON.parse(v);
-      } catch(e){}
-      return null;
-    })();
-    if (cached) return cached;
-
-    const url = `https://api.tomtom.com/routing/1/calculateRoute/${from}:${to}/json`
-      + `?traffic=true&travelMode=car&routeType=fastest&key=${_TOMTOM_KEY}`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(9000) });
-    if (!resp.ok) throw new Error(`TomTom HTTP ${resp.status}`);
-    const data = await resp.json();
-    const summary = data.routes?.[0]?.legs?.[0]?.summary;
-    if (!summary) throw new Error('Pas de route TomTom');
-
-    const travelSec       = summary.travelTimeInSeconds;
-    const noTrafficSec    = summary.noTrafficTravelTimeInSeconds || travelSec;
-    const historicSec     = summary.historicTrafficTravelTimeInSeconds || noTrafficSec;
-    const distM           = summary.lengthInMeters;
-    const mins            = Math.round(travelSec / 60);
-    const minsNoTraffic   = Math.round(noTrafficSec / 60);
-    const delayMin        = Math.max(0, mins - minsNoTraffic);
-    const km              = (distM / 1000).toFixed(1);
-    // Indice de congestion basé sur le délai relatif
-    const delayRatio = noTrafficSec > 0 ? travelSec / noTrafficSec : 1;
-    let congestion, cls;
-    if (delayRatio < 1.10)      { congestion='🟢 Fluide';        cls='ok'; }
-    else if (delayRatio < 1.30) { congestion='🟡 Modéré';        cls='info'; }
-    else if (delayRatio < 1.60) { congestion=`🟠 Chargé (+${delayMin}min)`; cls='warn'; }
-    else                        { congestion=`🔴 Embouteillages (+${delayMin}min)`; cls='danger'; }
-
-    let tip='';
-    if (zone.nom.includes('CDG')||zone.nom.includes('Orly')) tip='Courses longues rentables';
-    else if (zone.nom.includes('Défense')) tip='Clientèle affaires';
-
-    const result = { mins, minsNoTraffic, delayMin, km, congestion, cls, tip, source:'tomtom' };
-    try {
-      localStorage.setItem(cacheKey, JSON.stringify(result));
-      localStorage.setItem(cacheKey+'_ts', Date.now().toString());
-    } catch(e){}
-    return result;
-
-  } catch(e) {
-    console.warn('[fetchRoute TomTom]', zone.nom, e.message, '→ fallback OSRM');
-  }
-
-  // Fallback : OSRM (sans données trafic — estimation distance/vitesse)
   try {
     const url = `https://router.project-osrm.org/route/v1/driving/${state.pos.lon},${state.pos.lat};${zone.lon},${zone.lat}?overview=false`;
     const resp = await fetch(url, { signal:AbortSignal.timeout(7000) });
@@ -986,14 +985,14 @@ async function fetchRoute(zone) {
     if (!dur||!dist) return null;
     const mins=Math.round(dur/60), km=(dist/1000).toFixed(1), speed=(dist/1000)/(dur/3600);
     let congestion, cls;
-    if (speed>50)      { congestion='Fluide (estimé)';       cls='ok'; }
-    else if (speed>30) { congestion='Modéré (estimé)';       cls='info'; }
-    else if (speed>15) { congestion='Chargé (estimé)';       cls='warn'; }
-    else               { congestion='Congestionné (estimé)'; cls='danger'; }
+    if (speed>50)      { congestion='Fluide';       cls='ok'; }
+    else if (speed>30) { congestion='Modéré';       cls='info'; }
+    else if (speed>15) { congestion='Chargé';       cls='warn'; }
+    else               { congestion='Congestionné'; cls='danger'; }
     let tip='';
     if (zone.nom.includes('CDG')||zone.nom.includes('Orly')) tip='Courses longues rentables';
     else if (zone.nom.includes('Défense')) tip='Clientèle affaires';
-    return { mins, km, congestion, cls, tip, source:'osrm' };
+    return { mins, km, congestion, cls, tip };
   } catch { return null; }
 }
 
