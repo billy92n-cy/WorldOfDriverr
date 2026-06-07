@@ -229,10 +229,10 @@ const CARBURANT = {
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=${encodeURIComponent(geoWhere)}&limit=40&select=${select}`,
         // Fallback IDF (sans filtre géo précis)
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
-        // Fallback J-1 (données du jour précédent, stable)
-        `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-j-1/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
-        // SUPPRIMÉ: prix_des_carburants_en_france_flux_instantane_v2 (underscore) — alias instable
-        // SUPPRIMÉ: prix-carburants-fichier-instantane-test-ods-copie — dataset de test mort
+        // Fallback v1 sans suffixe (alias stable sur certaines régions)
+        `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
+        // Fallback données consolidées hebdo (dataset stable, sans filtre géo)
+        `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix_des_carburants_en_france/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
       ];
       let data = null;
       for (const url of URLS) {
@@ -403,8 +403,8 @@ const TRAFFIC = {
     const cached = getCached('wob_sytadin', WOB_CONFIG.CACHE_TTL.sytadin);
     if (cached) { this.renderSytadin(cached); return cached; }
     try {
-      // API Open Data IDF Mobilités — données trafic agrégées
-      const url = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/etat-du-reseau-routier-en-ile-de-france/records?limit=20&order_by=date_debut%20desc';
+      // API Open Data IDF Mobilités — perturbations réseau (dataset stable, remplace etat-du-reseau-routier supprimé)
+      const url = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/perturbations-en-temps-reel-sur-le-reseau-ferre/records?limit=10&select=ligne,type_perturbation,message&order_by=date_debut+desc';
       const resp = await fetch(url, { signal: AbortSignal.timeout(10000), headers: { 'Accept': 'application/json' } });
       if (!resp.ok) throw new Error(`Sytadin HTTP ${resp.status}`);
       const data = await resp.json();
@@ -421,10 +421,8 @@ const TRAFFIC = {
 
   async loadSytadinAlt() {
     try {
-      // Données trafic IDF via data.gouv.fr (open data réseau routier)
-      const url = 'https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/referentiel-des-obstacles-de-voirie/records?limit=5&select=nom,type_obstacle';
-      const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      // On utilise surtout l'heure actuelle pour générer un indice trafic réaliste
+      // Fallback direct sans requête externe — opendata.paris.fr bloque le CORS navigateur
+      // On passe directement à l'indice synthétique (fiable, pas de quota)
       const cached = getCached('wob_sytadin', Infinity);
       if (cached) { this.renderSytadin(cached); return cached; }
       // Indice calculé localement par heure (simulation réaliste)
@@ -1034,7 +1032,7 @@ const AVIATION = {
     // ADS-B Exchange — endpoint public, CORS *, pas d'auth requise
     const URLS = [
       `https://api.adsb.lol/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15`,
-      `https://adsbexchange-com1.p.rapidapi.com/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15/`,
+      `https://opensky-network.org/api/states/all?lamin=${pos.lat-0.2}&lomin=${pos.lon-0.2}&lamax=${pos.lat+0.2}&lomax=${pos.lon+0.2}`,
     ];
 
     for (const url of URLS) {
@@ -1048,7 +1046,16 @@ const AVIATION = {
         clearTimeout(tid);
         if (!resp.ok) { ERR('ADSB HTTP', resp.status); continue; }
         const json = await resp.json();
-        const acs = json.ac || json.aircraft || [];
+        // Normaliser les 2 formats : ADS-B lol (json.ac) et OpenSky (json.states)
+        let acs = json.ac || json.aircraft || [];
+        if (!acs.length && json.states) {
+          // OpenSky: states = tableau [icao24, callsign, origin, time_pos, last_contact, lon, lat, baro_alt, ...]
+          acs = json.states.map(s => ({
+            icao24: s[0], flight: (s[1]||'').trim(), lon: s[5], lat: s[6],
+            alt_baro: s[7] != null ? s[7] * 3.281 : 'ground', // m → ft
+            gs: s[9] ? s[9] * 1.944 : 0, // m/s → knots
+          }));
+        }
         if (!acs.length) continue;
 
         LOG(`ADSB ${airportCode} ${direction}: ${acs.length} appareils`);
