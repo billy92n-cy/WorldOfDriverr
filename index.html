@@ -14,7 +14,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -612,23 +611,13 @@
 
         <div class="card accordion-card" id="csv-card">
           <div class="acc-hd" onclick="toggleAccordion('csv-card')">
-            <span class="card-title" style="margin:0">Import CSV Uber / Bolt</span>
+            <span class="card-title" style="margin:0">📊 Historique des semaines</span>
             <svg class="acc-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
           <div class="acc-body">
-            <div class="file-drop">
-              <input type="file" id="csv-input" accept=".csv" multiple>
-              <label for="csv-input" class="file-lbl">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                <span>Choisir fichier(s) CSV</span>
-                <span class="dim-txt">Uber · Bolt · Multi-fichiers</span>
-              </label>
+            <div id="week-history-list" style="display:flex;flex-direction:column;gap:6px;">
+              <p class="empty-hint">Aucun historique — Les données de chaque semaine sont sauvegardées automatiquement chaque lundi à 4h.</p>
             </div>
-            <div id="csv-files-list" class="files-list"></div>
-            <button class="btn-danger" style="margin-top:10px" onclick="clearCSV()">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-              Effacer données CSV
-            </button>
           </div>
         </div>
 
