@@ -223,16 +223,18 @@ const CARBURANT = {
       const idfWhere  = `region_name="Ile-de-France" AND prix_valeur > 0`;
       const geoWhere  = `distance(geom, geom'POINT(${lon} ${lat})', 8000m) AND prix_valeur > 0`;
       const select    = 'adresse,ville,prix_valeur,prix_nom';
-      // URLs ordonnées par fiabilité — audit endpoints juin 2026
+      // URLs ordonnées par probabilité de succès CORS
       const URLS = [
-        // ★ Principal — instantané v2, CORS OK, mis à jour toutes 10min
+        // ★ Endpoint data.gouv.fr — CORS OK (vérifié 2025)
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=${encodeURIComponent(geoWhere)}&limit=40&select=${select}`,
-        // Fallback IDF (sans filtre géo précis)
+        // Variante région IDF (sans filtre géo)
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
-        // Fallback J-1 (données du jour précédent, stable)
+        // Variante underscore
+        `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix_des_carburants_en_france_flux_instantane_v2/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
+        // Dataset J-1 (parfois plus stable)
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-j-1/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
-        // SUPPRIMÉ: prix_des_carburants_en_france_flux_instantane_v2 (underscore) — alias instable
-        // SUPPRIMÉ: prix-carburants-fichier-instantane-test-ods-copie — dataset de test mort
+        // Fallback open data carbu historique
+        `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-carburants-fichier-instantane-test-ods-copie/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
       ];
       let data = null;
       for (const url of URLS) {
@@ -626,10 +628,35 @@ const NAVITIA = {
 
     let disruptions = null;
 
-    // Source 1 — Navitia.io (CORS OK, clé configurée, PRIMAIRE)
-    // ⚠️ PRIM disruptions-temps-reel requiert un token PRIM distinct (≠ Navitia) → non configuré → 401
-    // Navitia.io = API publique avec la clé NAVITIA_KEY, fonctionne directement
-    if (isKeySet(WOB_CONFIG.NAVITIA_KEY)) {
+    // Source 1 — IDFM Open Data perturbations (CORS OK depuis browser)
+    if (isKeySet(WOB_CONFIG.IDFM_KEY)) {
+      try {
+        // Dataset perturbations IDFM — endpoint CORS-autorisé
+        const url = 'https://prim.iledefrance-mobilites.fr/marketplace/disruptions-temps-reel/disruptions?count=50';
+        const ctrl = new AbortController();
+        const tid  = setTimeout(() => ctrl.abort(), 10000);
+        const resp = await fetch(url, {
+          signal: ctrl.signal,
+          headers: {
+            'apikey': WOB_CONFIG.IDFM_KEY,
+            'Accept': 'application/json',
+          },
+        });
+        clearTimeout(tid);
+        if (resp.ok) {
+          const data = await resp.json();
+          disruptions = this.parseDisruptions(data.disruptions || data.data || []);
+          LOG('IDFM PRIM disruptions OK:', disruptions.alerts.length, 'alertes');
+        } else {
+          ERR('IDFM PRIM HTTP:', resp.status, resp.status === 403 ? '— CORS bloqué, essai fallback' : '');
+        }
+      } catch(e) {
+        ERR('IDFM PRIM:', e.message, '— essai source alternative');
+      }
+    }
+
+    // Source 2 — Navitia.io (si PRIM échoue)
+    if (!disruptions && isKeySet(WOB_CONFIG.NAVITIA_KEY)) {
       try {
         const url = 'https://api.navitia.io/v1/coverage/fr-idf/disruptions?count=50&depth=1';
         const ctrl = new AbortController();
@@ -651,7 +678,7 @@ const NAVITIA = {
       }
     }
 
-    // Source 2 — IDFM Open Data v2.1 (sans clé, CORS OK, données routières)
+    // Source 3 — IDFM Open Data v2.1 (sans clé, CORS OK, données moins précises)
     if (!disruptions) {
       try {
         const url = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/etat-du-reseau-routier-en-ile-de-france/records?limit=10&select=nom,type_perturbation,date_debut';
@@ -659,7 +686,12 @@ const NAVITIA = {
         const tid  = setTimeout(() => ctrl.abort(), 8000);
         const resp = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
         clearTimeout(tid);
+        // Même si vide, on ne crash pas — fallback synthétique
         disruptions = { alerts: [], ts: Date.now(), _synthetic: true };
+        if (resp.ok) {
+          const data = await resp.json();
+          // Pas de données structurées perturbations ici — on utilise le synthétique
+        }
       } catch(e) {
         ERR('IDFM Open Data:', e.message);
       }
@@ -861,51 +893,73 @@ const AVIATION = {
     }
   },
 
-  // Fetch vols via ADS-B Exchange (gratuit, sans clé, CORS OK, remplace OpenSky)
-  // ⚠️ OpenSky a migré vers OAuth2 en 2024 — basic auth supprimé → BROKEN
-  // ADS-B Exchange /v2/lat/lon/dist/ : CORS OK, pas d'auth, données temps réel
+  // Fetch vols via ADS-B Exchange (adsb.lol) — gratuit, sans clé, CORS *
+  // ⚠️ OpenSky a migré vers OAuth2 en 2024 (basic auth supprimé) → BROKEN
+  // api.adsb.lol/v2 : pas d'authentification, CORS ouvert, données ADS-B temps réel
   async _fetchADP(airportCode, direction) {
     const AIRPORT_POS = {
       CDG: { lat: 49.009, lon: 2.547 },
       ORY: { lat: 48.723, lon: 2.379 },
     };
-    const pos   = AIRPORT_POS[airportCode] || AIRPORT_POS.CDG;
+    const AIRPORT_BOXES = {
+      CDG: { lamin:48.97, lomin:2.50, lamax:49.05, lomax:2.60 },
+      ORY: { lamin:48.70, lomin:2.33, lamax:48.75, lomax:2.42 },
+    };
+    const pos  = AIRPORT_POS[airportCode]  || AIRPORT_POS.CDG;
+    const box  = AIRPORT_BOXES[airportCode] || AIRPORT_BOXES.CDG;
     const isArr = direction === 'ARR';
 
-    // ADS-B Exchange — endpoint public, CORS *, pas d'auth requise
-    const URLS = [
-      `https://api.adsb.lol/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15`,
-      `https://adsbexchange-com1.p.rapidapi.com/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15/`,
+    // Source 1 — ADS-B Exchange via adsb.lol (CORS *, pas d'auth)
+    const ADSB_URLS = [
+      `https://api.adsb.lol/v2/lat/${pos.lat}/lon/${pos.lon}/dist/20`,
+      `https://api.adsb.lol/v2/lamax/${box.lamax}/lamin/${box.lamin}/lomax/${box.lomax}/lomin/${box.lomin}`,
     ];
 
-    for (const url of URLS) {
+    for (const url of ADSB_URLS) {
       try {
         const ctrl = new AbortController();
         const tid  = setTimeout(() => ctrl.abort(), 9000);
-        const resp = await fetch(url, {
-          signal: ctrl.signal,
-          headers: { 'Accept': 'application/json' },
-        });
+        const resp = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
         clearTimeout(tid);
         if (!resp.ok) { ERR('ADSB HTTP', resp.status); continue; }
         const json = await resp.json();
-        const acs = json.ac || json.aircraft || [];
-        if (!acs.length) continue;
-
+        const acs  = json.ac || json.aircraft || [];
+        if (!acs.length) { ERR('ADSB: 0 appareils'); continue; }
         LOG(`ADSB ${airportCode} ${direction}: ${acs.length} appareils`);
         const flights = acs.slice(0, 12).map(a => this._normalizeADSB(a, direction, airportCode));
         return flights;
       } catch(e) { ERR('ADSB URL:', e.message); }
     }
+
+    // Source 2 — OpenSky fallback (peut échouer si OAuth2 requis)
+    const OPENSKY_URLS = [
+      `https://opensky-network.org/api/states/all?lamin=${box.lamin}&lomin=${box.lomin}&lamax=${box.lamax}&lomax=${box.lomax}`,
+    ];
+    for (const url of OPENSKY_URLS) {
+      try {
+        const ctrl = new AbortController();
+        const tid  = setTimeout(() => ctrl.abort(), 8000);
+        const resp = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+        clearTimeout(tid);
+        if (!resp.ok) { ERR('OpenSky HTTP', resp.status); continue; }
+        const json = await resp.json();
+        const states = json.states || [];
+        if (!states.length) continue;
+        LOG(`OpenSky ${airportCode} ${direction}: ${states.length} appareils`);
+        const flights = states.slice(0, 12).map(s => this._normalizeOpenSky(s, direction, airportCode));
+        return flights;
+      } catch(e) { ERR('OpenSky URL:', e.message); }
+    }
     return null;
   },
 
-  // Normaliser format ADS-B Exchange → format interne WOD
+  // Normaliser format ADS-B Exchange (adsb.lol) → format interne WOD
   _normalizeADSB(ac, direction, airport) {
     const callsign  = (ac.flight || ac.r || '').trim();
-    const onGround  = ac.alt_baro === 'ground' || ac.gs < 30;
-    const altitude  = typeof ac.alt_baro === 'number' ? ac.alt_baro * 0.3048 : 0; // ft → m
-    const velocity  = ac.gs || 0; // knots
+    const onGround  = ac.alt_baro === 'ground' || (ac.gs !== undefined && ac.gs < 30);
+    const altFt     = typeof ac.alt_baro === 'number' ? ac.alt_baro : 0;
+    const altitude  = altFt * 0.3048; // ft → m
+    const speedKts  = ac.gs || 0;
     const isArr     = direction === 'ARR';
     const isApproaching = isArr && altitude < 3000 && !onGround;
     const etaOffsetMin  = isApproaching ? Math.max(5, Math.round(altitude / 300)) : 0;
@@ -913,40 +967,35 @@ const AVIATION = {
     return {
       flight:   { iata: callsign || `${airport}???` },
       airline:  { name: callsign ? callsign.slice(0, 3) : '—' },
-      departure: isArr ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
-      arrival:  !isArr ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
+      departure: isArr  ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
+      arrival:  !isArr  ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
       status:   onGround ? 'landed' : isApproaching ? 'active' : 'en-route',
       terminal: '',
       _source:  'adsb',
-      _velocity: Math.round(velocity * 1.852), // knots → km/h
+      _velocity: Math.round(speedKts * 1.852),
       _altitude: Math.round(altitude),
     };
   },
 
-
+  // Normaliser format OpenSky → format interne WOD
+  _normalizeOpenSky(state, direction, airport) {
     const callsign  = (state[1] || '').trim();
     const onGround  = state[8] === true;
-    const velocity  = state[9] || 0; // m/s
-    const altitude  = state[13] || state[7] || 0; // m
+    const velocity  = state[9] || 0;
+    const altitude  = state[13] || state[7] || 0;
     const isArr     = direction === 'ARR';
-
-    // Estimer ETA : vol en approche si altitude < 3000m et vitesse < 150m/s
     const isApproaching = isArr && altitude < 3000 && !onGround;
-    const isDeparting   = !isArr && (onGround || altitude < 1500);
-
-    // Temps estimé d'arrivée basé sur altitude (approximation)
     const etaOffsetMin = isApproaching ? Math.max(5, Math.round(altitude / 300)) : 0;
     const eta = new Date(Date.now() + etaOffsetMin * 60000).toISOString();
-
     return {
       flight:   { iata: callsign || `${airport}???` },
       airline:  { name: callsign ? callsign.slice(0, 3) : '—' },
-      departure: isArr ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
-      arrival:   !isArr ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
+      departure: isArr  ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
+      arrival:  !isArr  ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
       status:   onGround ? 'landed' : isApproaching ? 'active' : 'en-route',
       terminal: '',
       _source:  'opensky',
-      _velocity: Math.round(velocity * 3.6), // km/h pour affichage
+      _velocity: Math.round(velocity * 3.6),
       _altitude: Math.round(altitude),
     };
   },
@@ -1352,9 +1401,17 @@ const WOB_STATE = {
 //  INJECTION CONTAINERS HTML
 // ═══════════════════════════════════════════════════════════════════
 function injectContainers() {
-  const rushScroll = document.querySelector('#screen-rush .screen-scroll') ||
-                     document.querySelector('#screen-home .screen-scroll');
-  if (!rushScroll) return;
+  // Cherche le scroll de l'onglet rush OU home OU le premier screen-scroll disponible
+  const rushScroll = document.querySelector('#screen-rush .screen-scroll')
+    || document.querySelector('#screen-home .screen-scroll')
+    || document.querySelector('.screen.active .screen-scroll')
+    || document.querySelector('.screen-scroll');
+
+  if (!rushScroll) {
+    // DOM pas encore prêt — réessayer dans 500ms
+    setTimeout(injectContainers, 500);
+    return;
+  }
 
   // 1. Météo
   if (!el('meteo-container')) {
@@ -1369,7 +1426,7 @@ function injectContainers() {
     heroCard ? heroCard.after(d) : rushScroll.prepend(d);
   }
 
-  // 2. Trafic (TomTom + Sytadin) — NOUVEAU
+  // 2. Trafic
   if (!el('traffic-container')) {
     const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
     d.innerHTML = `
@@ -1382,7 +1439,7 @@ function injectContainers() {
     meteoCard ? meteoCard.after(d) : rushScroll.prepend(d);
   }
 
-  // 3. Alertes Transport en Commun (Navitia) — NOUVEAU
+  // 3. Alertes Transport en Commun
   if (!el('navitia-container')) {
     const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
     d.innerHTML = `
@@ -1410,13 +1467,13 @@ function injectContainers() {
     rushScroll.append(d);
   }
 
-  // 5. Vols ADP (remplace AviationStack)
+  // 5. Vols CDG & Orly
   if (!el('flights-cdg')) {
     const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
     d.innerHTML = `
       <div style="margin-bottom:10px;">
         <div class="card-row-hd">
-          <span class="card-title">✈️ Vols en temps réel <span style="font-size:9px;color:var(--text-dim);">Open Data ADP</span></span>
+          <span class="card-title">✈️ Vols en temps réel <span style="font-size:9px;color:var(--text-dim);">ADS-B Live</span></span>
           <div style="display:flex;gap:6px;">
             <button class="ef-btn active" onclick="selectAirport('CDG',this)">CDG</button>
             <button class="ef-btn" onclick="selectAirport('ORY',this)">Orly</button>
@@ -1427,7 +1484,7 @@ function injectContainers() {
           <button class="ef-btn" onclick="selectFlightType('dep',this)" id="ft-dep">Départs</button>
         </div>
       </div>
-      <div id="flights-cdg"></div>
+      <div id="flights-cdg"><div class="list-item info">⏳ Chargement vols CDG...</div></div>
       <div id="flights-ory" style="display:none;"></div>`;
     rushScroll.append(d);
   }
@@ -1483,104 +1540,101 @@ function injectCSS() {
 //  Stratégie: charge tout au démarrage, puis intervalle minimal
 // ═══════════════════════════════════════════════════════════════════
 function initAPIs() {
-  LOG('Initialisation APIs WOD v7.0');
+  LOG('Initialisation APIs WOD v7.1');
   injectCSS();
-  injectContainers();
-  if (window.Chart) CHARTS_PRO.globalDefaults();
-  else window.addEventListener('load', () => { if (window.Chart) CHARTS_PRO.globalDefaults(); });
 
-  AUTOSAVE.start();
-  AUTOSAVE.setupCleanExit();
+  // Attendre que le DOM soit prêt avant d'injecter les containers
+  const domReady = () => {
+    injectContainers();
+    if (window.Chart) CHARTS_PRO.globalDefaults();
+    else window.addEventListener('load', () => { if (window.Chart) CHARTS_PRO.globalDefaults(); });
 
-  const defaultPos = { lat: 48.8566, lon: 2.3522 };
+    AUTOSAVE.start();
+    AUTOSAVE.setupCleanExit();
 
-  // Charger météo immédiatement (sans limite)
-  METEO.load(defaultPos.lat, defaultPos.lon);
+    const defaultPos = { lat: 48.8566, lon: 2.3522 };
 
-  // Attendre GPS puis charger carburant et trafic TomTom
-  let _carbuLoaded = false, _gpsWaitCount = 0;
-  const _gpsWait = setInterval(() => {
-    _gpsWaitCount++;
-    const s = window.state;
-    const ready = s?.gpsReady && Math.abs(s.pos.lat - 48.8566) > 0.002;
-    if (ready || _gpsWaitCount >= 20) {
-      clearInterval(_gpsWait);
-      const pos = ready ? s.pos : defaultPos;
-      if (!_carbuLoaded) {
-        _carbuLoaded = true;
-        CARBURANT.load(pos.lat, pos.lon);
-        if (ready) METEO.load(pos.lat, pos.lon);
+    // Charger météo immédiatement avec position Paris par défaut
+    // (re-chargera avec position GPS dès qu'elle est dispo)
+    METEO.load(defaultPos.lat, defaultPos.lon);
+
+    // Charger vols CDG immédiatement (pas besoin de GPS)
+    setTimeout(() => {
+      AVIATION.loadArrivals('CDG');
+    }, 800);
+
+    // Attendre GPS puis charger carburant avec position réelle
+    let _carbuLoaded = false, _gpsWaitCount = 0;
+    const _gpsWait = setInterval(() => {
+      _gpsWaitCount++;
+      const s = window.state;
+      const ready = s?.gpsReady && Math.abs(s.pos.lat - 48.8566) > 0.002;
+      if (ready || _gpsWaitCount >= 20) {
+        clearInterval(_gpsWait);
+        const pos = ready ? s.pos : defaultPos;
+        if (!_carbuLoaded) {
+          _carbuLoaded = true;
+          CARBURANT.load(pos.lat, pos.lon);
+          if (ready) METEO.load(pos.lat, pos.lon);
+        }
       }
-    }
-  }, 400);
+    }, 500);
 
-  // Trafic (TomTom + Sytadin) — 1 chargement initial
-  setTimeout(() => TRAFFIC.load(), 1000);
+    // Trafic — 1 chargement initial
+    setTimeout(() => TRAFFIC.load(), 1000);
 
-  // Navitia alertes TC
-  setTimeout(() => NAVITIA.load(), 1500);
+    // Navitia alertes TC
+    setTimeout(() => NAVITIA.load(), 1500);
 
-  // Vols ADP (cache 1h — économique)
-  setTimeout(() => {
-    AVIATION.loadArrivals('CDG');
-    AVIATION.loadArrivals('ORY');
-  }, 2000);
+    // IA Zones
+    setTimeout(() => IA_ZONES.buildAdvice(), 3000);
 
-  // IA Zones
-  setTimeout(() => IA_ZONES.buildAdvice(), 3000);
+    // ─────────────────────────────────────────────────────
+    //  INTERVALLES AUTO-REFRESH — minimaux pour quotas gratuits
+    // ─────────────────────────────────────────────────────
+    setInterval(() => { const p = window.state?.pos || defaultPos; METEO.load(p.lat, p.lon); }, WOB_CONFIG.REFRESH.meteo);
+    setInterval(() => { const p = window.state?.pos || defaultPos; CARBURANT.load(p.lat, p.lon); }, WOB_CONFIG.REFRESH.carbu);
+    setInterval(() => TRAFFIC.load(), WOB_CONFIG.REFRESH.traffic);
+    setInterval(() => NAVITIA.load(), WOB_CONFIG.REFRESH.navitia);
+    setInterval(() => { AVIATION.loadArrivals('CDG'); AVIATION.loadArrivals('ORY'); }, WOB_CONFIG.REFRESH.flights);
+    setInterval(() => IA_ZONES.buildAdvice(), 5 * 60 * 1000);
 
-  // ─────────────────────────────────────────────────────
-  //  INTERVALLES AUTO-REFRESH — minimaux pour quotas gratuits
-  // ─────────────────────────────────────────────────────
+    // Rechargement si déplacement GPS significatif (>1km)
+    let _lastGpsLat = 0;
+    setInterval(() => {
+      const s = window.state;
+      if (s?.gpsReady && Math.abs(s.pos.lat - _lastGpsLat) > 0.01) {
+        _lastGpsLat = s.pos.lat;
+        METEO.load(s.pos.lat, s.pos.lon);
+        CARBURANT.load(s.pos.lat, s.pos.lon);
+        const trafficCacheAge = Date.now() - parseInt(localStorage.getItem('wob_tomtom_flow_ts') || '0');
+        if (trafficCacheAge > WOB_CONFIG.CACHE_TTL.traffic) TRAFFIC.load();
+      }
+    }, 60000);
 
-  // Météo: 30min (sans limite)
-  setInterval(() => {
-    const p = window.state?.pos || defaultPos;
-    METEO.load(p.lat, p.lon);
-  }, WOB_CONFIG.REFRESH.meteo);
+    LOG('APIs WOD v7.1 initialisées ✅');
+  }; // fin domReady
 
-  // Carburant: 1h (sans limite)
-  setInterval(() => {
-    const p = window.state?.pos || defaultPos;
-    CARBURANT.load(p.lat, p.lon);
-  }, WOB_CONFIG.REFRESH.carbu);
-
-  // Trafic: 20min (TomTom ~72 req/jour sur 2500 dispo)
-  setInterval(() => TRAFFIC.load(), WOB_CONFIG.REFRESH.traffic);
-
-  // Navitia: 30min
-  setInterval(() => NAVITIA.load(), WOB_CONFIG.REFRESH.navitia);
-
-  // Vols ADP: 1h (Open Data, sans limite stricte mais prudent)
-  setInterval(() => {
-    AVIATION.loadArrivals('CDG');
-    AVIATION.loadArrivals('ORY');
-  }, WOB_CONFIG.REFRESH.flights);
-
-  // IA Zones: 5min (calcul local, pas d'API)
-  setInterval(() => IA_ZONES.buildAdvice(), 5 * 60 * 1000);
-
-  // Rechargement si déplacement GPS significatif (>1km)
-  let _lastGpsLat = 0;
-  setInterval(() => {
-    const s = window.state;
-    if (s?.gpsReady && Math.abs(s.pos.lat - _lastGpsLat) > 0.01) {
-      _lastGpsLat = s.pos.lat;
-      METEO.load(s.pos.lat, s.pos.lon);
-      CARBURANT.load(s.pos.lat, s.pos.lon);
-      // TomTom: seulement si le cache est expiré (pour éviter de consommer les 2500 req)
-      const trafficCacheAge = Date.now() - parseInt(LS.get('wob_tomtom_flow_ts') || '0');
-      if (trafficCacheAge > WOB_CONFIG.CACHE_TTL.traffic) TRAFFIC.load();
-    }
-  }, 60000);
-
-  LOG('APIs WOD v7.0 initialisées ✅');
-  LOG('📊 Budget API/jour estimé: TomTom ~72 req (sur 2500 max) | Navitia ~48 req | ADP Open Data illimité');
+  // Lancer domReady quand le DOM de l'app est disponible
+  if (document.querySelector('.screen-scroll') || document.querySelector('#screen-home')) {
+    setTimeout(domReady, 200);
+  } else {
+    // Attendre que l'app soit montée
+    const obs = new MutationObserver(() => {
+      if (document.querySelector('.screen-scroll') || document.querySelector('#screen-home')) {
+        obs.disconnect();
+        setTimeout(domReady, 200);
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    // Fallback 3s max
+    setTimeout(() => { obs.disconnect(); domReady(); }, 3000);
+  }
 }
 
-// Lancer après que l'app principale soit prête
-if (document.readyState === 'complete') setTimeout(initAPIs, 1500);
-else window.addEventListener('load', () => setTimeout(initAPIs, 1500));
+// Lancer après que l'app principale soit prête (délai réduit à 800ms)
+if (document.readyState === 'complete') setTimeout(initAPIs, 800);
+else window.addEventListener('load', () => setTimeout(initAPIs, 800));
 
 // Exposer globalement
 window.METEO      = METEO;

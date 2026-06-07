@@ -684,115 +684,50 @@ function getElapsedDays() {
 window.generateIAReport = async function() {
   const iaEl  = $('ia-report');
   const dotEl = $('ia-dots');
-  if (!iaEl) return;
+  if (!iaEl || state.totalGain === 0) return;
   dotEl?.classList.add('active');
-  iaEl.textContent = '⭐ Coach analyse vos données...';
+  iaEl.textContent = 'Analyse en cours...';
 
-  // ── Collecte des données courses de la semaine ──
-  const rides   = (() => { try { return JSON.parse(ls('wob_rides') || '[]'); } catch { return []; } })();
-  const conso   = parseFloat(ls('wob_conso')) || 6.5;
-  const prixC   = parseFloat(ls('wob_prix'))  || 1.85;
-  const vehType = ls('wob_veh_type') || 'essence';
+  const conso    = parseFloat(ls('wob_conso')) || 6.5;
+  const prixCarb = parseFloat(ls('wob_prix'))  || 1.85;
+  const fuel     = state.totalKm * (conso / 100) * prixCarb;
+  const totalDep = state.depenses.reduce((s, d) => s + d.montant, 0);
+  const net      = state.totalGain - fuel - totalDep;
+  const ratio    = state.totalKm > 0 ? net / state.totalKm : 0;
+  const avg      = state.totalTrips > 0 ? state.totalGain / state.totalTrips : 0;
 
-  // Stats de base
-  const nb     = rides.length;
-  const brut   = rides.reduce((s,r) => s+r.price, 0);
-  const km     = rides.reduce((s,r) => s+(r.km||0), 0);
-  const mins   = rides.reduce((s,r) => s+(r.minutes||0), 0);
-  const avg    = nb > 0 ? brut/nb : 0;
-  const fuel   = km * (conso/100) * prixC;
-  const net    = brut - fuel;
-  const hRate  = mins > 0 ? net/(mins/60) : 0;
-  const avgKm  = nb > 0 ? km/nb : 0;
-  const avgMin = nb > 0 ? mins/nb : 0;
+  // Données mensuelles
+  const monthly  = JSON.parse(ls('wob_monthly') || '[]');
+  const nbMonths = monthly.length;
 
-  // Répartition horaire
-  const byHour = {};
-  rides.forEach(r => {
-    if (r.date) {
-      const h = new Date(r.date).getHours();
-      byHour[h] = (byHour[h]||0) + r.price;
+  // Construire le résumé pour l'IA
+  let monthlyLines = '';
+  monthly.forEach(m => {
+    monthlyLines += `\n• ${m.month} (${m.platform}) : ${m.totalTTC?.toFixed(2) || m.gain?.toFixed(2) || '?'}€ bruts · ${m.trips} courses`;
+    if (m.weeklyBreakdown && Object.keys(m.weeklyBreakdown).length > 0) {
+      Object.entries(m.weeklyBreakdown).sort().forEach(([wk, val]) => {
+        monthlyLines += `\n    - ${wk} : ${val.toFixed(2)}€`;
+      });
     }
   });
-  const bestHour = Object.entries(byHour).sort((a,b)=>b[1]-a[1])[0];
-  const bestHourStr = bestHour ? `${bestHour[0]}h-${parseInt(bestHour[0])+1}h` : null;
 
-  // Données trafic / météo / zones disponibles dans l'app
-  const trafficData   = window._lastTrafficData   || null;
-  const meteoData     = window._lastMeteoData     || null;
-  const rushData      = window._lastRushData      || null;
+  const prompt = `Tu es un assistant expert VTC. Génère une analyse concise en français (3-5 phrases + conseils).
 
-  // Contexte trafic
-  let trafficContext = '';
-  if (trafficData?.zones?.length > 0) {
-    const worst = trafficData.zones.filter(z => z.cls === 'danger' || z.cls === 'warn').slice(0,3);
-    if (worst.length) trafficContext = `Embouteillages actuels : ${worst.map(z=>`${z.nom} +${z.delayMin||'?'}min`).join(', ')}.`;
-  }
+RÈGLE ABSOLUE : chaque fichier CSV = UN mois complet. Le revenu mensuel = somme de TOUS les Prix TTC des courses de ce mois. Ne jamais extrapoler annuellement à partir d'un seul mois.
 
-  // Contexte météo
-  let meteoContext = '';
-  if (meteoData) {
-    meteoContext = `Météo Paris : ${meteoData.desc || ''}, ${meteoData.temp ? meteoData.temp+'°C' : ''}, ${meteoData.impact || ''}.`;
-  }
+Données par mois importé (${nbMonths} mois) :${monthlyLines || '\n• Pas de détail mensuel disponible'}
 
-  // Zones chaudes
-  let zoneContext = '';
-  if (rushData?.hotZones?.length > 0) {
-    zoneContext = `Zones chaudes en ce moment : ${rushData.hotZones.slice(0,4).join(', ')}.`;
-  }
+Totaux cumulés (${nbMonths} mois confondus) :
+- Gains bruts : ${state.totalGain.toFixed(2)}€
+- Courses : ${state.totalTrips}
+- Distance : ${state.totalKm.toFixed(0)} km${state.totalKm > 0 ? '' : ' (non renseignée)'}
+- Carburant estimé : ${fuel.toFixed(2)}€
+- Dépenses pro : ${totalDep.toFixed(2)}€
+- Bénéfice net estimé : ${net.toFixed(2)}€
+- Moyenne par course : ${avg.toFixed(2)}€/course
+- Véhicule : ${ls('wob_veh_type') || 'essence'}
 
-  // Varier le focus du conseil à chaque appel (timestamp pour randomiser)
-  const focusIndex = Math.floor(Date.now() / 1000) % 8;
-  const FOCUS_LABELS = [
-    'rentabilité et tarif horaire',
-    'optimisation des créneaux horaires',
-    'zones et positionnement géographique',
-    'réduction des kilomètres à vide',
-    'sélection des courses les plus rentables',
-    'gestion du carburant et des coûts',
-    'stratégie face aux embouteillages',
-    'maximisation du revenu par heure',
-  ];
-  const focus = FOCUS_LABELS[focusIndex];
-
-  // Si pas encore de courses cette semaine
-  if (nb === 0) {
-    const prompts = [
-      "Aucune course enregistrée cette semaine. Début de semaine : positionne-toi dès 7h en ZAG (Zone Aéroport de Gaulle) — les transfers d'affaires matinaux sont les plus rentables (>20€/course). Évite le périphérique avant 9h.",
-      "Pas encore de données cette semaine. Conseil préventif : les dimanches soirs 17h-22h autour des gares TGV (Montparnasse, Lyon, St-Lazare) génèrent jusqu'à 30% de revenus en plus grâce aux retours de week-end.",
-      "Semaine vierge. Analyse des patterns gagnants en IDF : les créneaux 7h-9h et 18h-21h en semaine, couplés au positionnement Défense-Centre, donnent un ratio net/km 40% supérieur aux heures creuses.",
-    ];
-    const txt = prompts[Math.floor(Date.now() / 60000) % prompts.length];
-    iaEl.textContent = txt;
-    setLS('wob_ia', txt);
-    dotEl?.classList.remove('active');
-    return;
-  }
-
-  const prompt = `Tu es un coach expert VTC parisien de haut niveau. Tu analyses les données réelles d'un chauffeur et fournis des conseils d'expert ultra-précis, concrets et directement actionnables.
-
-RÈGLES STRICTES :
-- Concentre-toi UNIQUEMENT sur des conseils pour améliorer les revenus, les trajets, le positionnement, l'activité
-- Ne répète PAS les chiffres bruts déjà affichés dans l'appli (pas de "tu as fait X courses à Y€")
-- PAS de prévisions ou projections
-- Focus de cette analyse : ${focus}
-- Ton expert, professionnel, engagé — comme un manager de flotte qui parle à son meilleur chauffeur
-- 3-4 phrases percutantes maximum, style direct et motivant
-
-DONNÉES COURSES (semaine en cours) :
-- ${nb} courses · brut ${brut.toFixed(2)}€ · net estimé ${net.toFixed(2)}€
-- Tarif horaire net : ${hRate.toFixed(2)}€/h · Moyenne par course : ${avg.toFixed(2)}€
-- Distance moyenne/course : ${avgKm.toFixed(1)} km · Durée moyenne : ${avgMin.toFixed(0)} min
-- Km totaux : ${km.toFixed(0)} km · Carburant : ${fuel.toFixed(2)}€
-- Véhicule : ${vehType} · Conso : ${conso}L/100km à ${prixC}€/L
-- Meilleur créneau horaire : ${bestHourStr || 'non déterminé'}
-
-CONTEXTE TEMPS RÉEL :
-${trafficContext || 'Trafic : données non disponibles.'}
-${meteoContext || 'Météo : non disponible.'}
-${zoneContext || ''}
-
-Génère maintenant tes conseils d'expert en français, focalisés sur : ${focus}.`;
+Fournis : performance mensuelle, comparaison des semaines si disponible, 2 conseils concrets pour optimiser les revenus.`;
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -800,32 +735,29 @@ Génère maintenant tes conseils d'expert en français, focalisés sur : ${focus
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 400,
+        max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }]
       })
     });
     if (!resp.ok) throw new Error(`API ${resp.status}`);
     const data = await resp.json();
-    const text = data.content?.map(c => c.text || '').join('').trim() || '';
+    const text = data.content?.map(c => c.text || '').join('') || '';
     iaEl.textContent = text;
     setLS('wob_ia', text);
-    setLS('wob_ia_ts', Date.now().toString());
   } catch {
-    // Fallback local — conseil rotatif expert
-    const FALLBACKS = [
-      `💡 Ton tarif horaire net de ${hRate.toFixed(2)}€/h ${hRate > 25 ? 'est excellent — maintiens ce rythme en restant sur les zones Défense/Opera.' : 'peut progresser — concentre-toi sur les courses >15€ et évite les trajets <10min.'}`,
-      `🗺️ Positionnement stratégique : ${avgKm < 8 ? 'tes courses courtes indiquent une zone urbaine dense — cibles les hôtels 4★ et gares pour des trajets plus longs et mieux rémunérés.' : 'bonne longueur moyenne — optimise les retours en ciblant CDG et Orly pour éviter les km à vide.'}`,
-      `⏱️ ${bestHourStr ? `Ton créneau le plus rentable est ${bestHourStr} — bloc ces heures en priorité et évite les créneaux creux qui diluent ton tarif horaire.` : 'Analyse tes créneaux horaires — les 7h-9h et 18h-21h en semaine sont généralement les pics de rentabilité en IDF.'}`,
-      `⛽ ${km > 0 ? `Avec ${(fuel/brut*100).toFixed(0)}% de tes revenus en carburant, ${fuel/brut > 0.15 ? 'tu dépasses le seuil optimal (15%) — réduis les km à vide en te positionnant mieux entre les courses.' : 'ta gestion carburant est efficace — maintiens cette discipline.'}` : 'Renseigne tes kilomètres pour que le coach puisse optimiser ton ratio carburant/revenu.'}`,
-    ];
-    const txt = FALLBACKS[Math.floor(Date.now() / 30000) % FALLBACKS.length];
+    // Fallback local
+    const bestMonth = monthly.length > 0
+      ? monthly.reduce((a, b) => ((a.totalTTC||a.gain||0) > (b.totalTTC||b.gain||0) ? a : b))
+      : null;
+    const txt = `📊 ${nbMonths} mois importé(s) · ${state.totalTrips} courses · ${state.totalGain.toFixed(2)}€ bruts.`
+      + (bestMonth ? ` Meilleur mois : ${bestMonth.month} (${(bestMonth.totalTTC||bestMonth.gain||0).toFixed(2)}€).` : '')
+      + ` Moyenne : ${avg.toFixed(2)}€/course. Optimisez vos créneaux CDG/Orly pour augmenter la moyenne.`;
     iaEl.textContent = txt;
     setLS('wob_ia', txt);
   } finally {
     dotEl?.classList.remove('active');
   }
 };
-
 
 // ══════════════════════════════════════════════════
 //  CHARTS
@@ -1016,13 +948,6 @@ window.loadTraffic = async function() {
   zonesEl.innerHTML = `<div class="list-item info">Calcul des trajets...</div>`;
 
   const results = await Promise.all(IDF_ZONES.map(z => fetchRoute(z)));
-
-  // Exposer les données trafic pour le coach IA
-  window._lastTrafficData = {
-    zones: IDF_ZONES.map((z,i) => results[i] ? { nom: z.nom, ...results[i] } : null).filter(Boolean),
-    ts: Date.now(),
-  };
-
   let html = '';
   IDF_ZONES.forEach((z,i) => {
     const r = results[i];
@@ -1086,22 +1011,20 @@ window.loadEvents = async function(forceRefresh) {
   el.innerHTML = `<div class="list-item info">Chargement des événements...</div>`;
 
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const in21d = new Date(Date.now() + 21 * 86400000).toISOString().split('T')[0];
+    const today = new Date().toISOString().split('T')[0];   // YYYY-MM-DD
+    const in14d = new Date(Date.now() + 14 * 86400000).toISOString().split('T')[0];
     let results = null;
 
-    // ── Source 1 : Paris OpenData que-faire-a-paris (CORS OK) ──
+    // ── Source 1 : Paris OpenData que-faire-a-paris (CORS OK, dataset actif juin 2026) ──
+    // ⚠️ Syntaxe correcte v2.1 : date_start >= "2026-06-07" (guillemets, PAS date'...')
     try {
-      const where    = `date_start >= date'${today}' AND date_start <= date'${in21d}'`;
+      const where = `date_start >= "${today}" AND date_start <= "${in14d}"`;
       const parisUrl = `https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records`
-        + `?where=${encodeURIComponent(where)}&order_by=date_start&limit=25`
+        + `?where=${encodeURIComponent(where)}&order_by=date_start&limit=30`
         + `&select=title,date_start,address_name,address_zipcode,tags,url,price_type`;
       const ctrl1 = new AbortController();
       const t1    = setTimeout(() => ctrl1.abort(), 10000);
-      const r1    = await fetch(parisUrl, {
-        signal: ctrl1.signal,
-        headers: { 'Accept': 'application/json' },
-      });
+      const r1    = await fetch(parisUrl, { signal: ctrl1.signal, headers: { 'Accept': 'application/json' } });
       clearTimeout(t1);
       if (r1.ok) {
         const d1 = await r1.json();
@@ -1109,68 +1032,77 @@ window.loadEvents = async function(forceRefresh) {
           results = d1.results;
           console.log('[Events] Paris OpenData OK:', results.length, 'événements');
         } else {
-          console.warn('[Events] Paris OpenData: 0 résultats');
+          // Essayer sans filtre de date si 0 résultats (date_start peut varier)
+          const r1b = await fetch(
+            `https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records?limit=30&order_by=date_start&select=title,date_start,address_name,tags,url`,
+            { headers: { 'Accept': 'application/json' } }
+          );
+          if (r1b.ok) {
+            const d1b = await r1b.json();
+            if (d1b.results?.length >= 1) { results = d1b.results; console.log('[Events] Paris OD (sans filtre) OK:', results.length); }
+          }
         }
       } else {
         console.warn('[Events] Paris OpenData HTTP:', r1.status);
       }
     } catch(e1) { console.warn('[Events] Paris OD:', e1.message); }
 
-    // ── Source 2 : Open Data IDF Culturel (dataset corrigé) ──
+    // ── Source 2 : OpenAgenda — agenda officiel Ville de Paris (JSON public, CORS OK) ──
     if (!results) {
       try {
-        // Dataset correct 2025 : "les-evenements-culturels-de-la-region-ile-de-france"
-        const idfUrls = [
-          `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-culturels-de-la-region-ile-de-france/records?limit=20&order_by=date_debut&select=nom,date_debut,commune,type_evenement`,
-          // Variante ancien nom
-          `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-du-service-culturel-de-la-region-ile-de-france/records?limit=20&select=nom,date_debut,commune,type_evenement`,
+        // OpenAgenda fournit un endpoint JSON public sans auth pour les agendas publics
+        const oaUrls = [
+          `https://openagenda.com/agendas/95528678/events.json?limit=20&passed=0`,  // Ville de Paris
+          `https://openagenda.com/agendas/75970000/events.json?limit=20&passed=0`,  // Paris Culture
+          `https://openagenda.com/ville-de-paris/events.json?limit=20`,
         ];
-        for (const idfUrl of idfUrls) {
-          const ctrl3 = new AbortController();
-          const t3    = setTimeout(() => ctrl3.abort(), 8000);
-          const r3    = await fetch(idfUrl, { signal: ctrl3.signal, headers: { 'Accept': 'application/json' } });
-          clearTimeout(t3);
-          if (r3.ok) {
-            const d3 = await r3.json();
-            if (d3.results?.length >= 1) {
-              results = d3.results.map(ev => ({
-                title:        ev.nom || 'Événement IDF',
-                date_start:   ev.date_debut?.split('T')[0] || today,
-                address_name: ev.commune || 'Île-de-France',
-                tags:         ev.type_evenement || '',
-              }));
-              console.log('[Events] IDF OK:', results.length);
-              break;
+        for (const oaUrl of oaUrls) {
+          try {
+            const ctrl4 = new AbortController();
+            const t4    = setTimeout(() => ctrl4.abort(), 8000);
+            const r4    = await fetch(oaUrl, { signal: ctrl4.signal, headers: { 'Accept': 'application/json' } });
+            clearTimeout(t4);
+            if (r4.ok) {
+              const d4 = await r4.json();
+              const evts = d4.events || d4.items || [];
+              if (evts.length >= 1) {
+                results = evts.map(ev => ({
+                  title:        ev.title?.fr || ev.title || 'Événement Paris',
+                  date_start:   ev.firstTiming?.begin?.split('T')[0] || today,
+                  address_name: ev.location?.name || 'Paris',
+                  tags:         ev.categories?.map(c => c.label?.fr || '').join(',') || '',
+                  url:          ev.canonicalUrl || '',
+                }));
+                console.log('[Events] OpenAgenda OK:', results.length, 'depuis', oaUrl);
+                break;
+              }
             }
+          } catch(oe) { console.warn('[Events] OpenAgenda URL:', oe.message); }
+        }
+      } catch(e4) { console.warn('[Events] OpenAgenda global:', e4.message); }
+    }
+
+    // ── Source 3 : IDF Cultural dataset (fallback) ──
+    if (!results) {
+      try {
+        const idfUrl = `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-culturels-de-la-region-ile-de-france/records?limit=20&order_by=date_debut&select=nom,date_debut,commune,type_evenement`;
+        const ctrl3 = new AbortController();
+        const t3    = setTimeout(() => ctrl3.abort(), 8000);
+        const r3    = await fetch(idfUrl, { signal: ctrl3.signal, headers: { 'Accept': 'application/json' } });
+        clearTimeout(t3);
+        if (r3.ok) {
+          const d3 = await r3.json();
+          if (d3.results?.length >= 1) {
+            results = d3.results.map(ev => ({
+              title:        ev.nom || 'Événement IDF',
+              date_start:   ev.date_debut?.split('T')[0] || today,
+              address_name: ev.commune || 'Île-de-France',
+              tags:         ev.type_evenement || '',
+            }));
+            console.log('[Events] IDF OK:', results.length);
           }
         }
       } catch(e3) { console.warn('[Events] IDF:', e3.message); }
-    }
-
-    // ── Source 3 : OpenAgenda public sans authentification (agenda Ville de Paris) ──
-    // NOTE: openagenda.com requiert une clé API pour /v2/events — on utilise l'embed public
-    if (!results) {
-      try {
-        // Format public RSS d'OpenAgenda (pas besoin de clé)
-        const oaUrl = `https://openagenda.com/ville-de-paris/events.json?limit=20&oaq%5Bpassed%5D=0`;
-        const ctrl4 = new AbortController();
-        const t4    = setTimeout(() => ctrl4.abort(), 8000);
-        const r4    = await fetch(oaUrl, { signal: ctrl4.signal });
-        clearTimeout(t4);
-        if (r4.ok) {
-          const d4 = await r4.json();
-          const evts = d4.events || d4.items || [];
-          if (evts.length >= 1) {
-            results = evts.map(ev => ({
-              title:        ev.title?.fr || ev.title || 'Événement Paris',
-              date_start:   ev.firstTiming?.begin?.split('T')[0] || today,
-              address_name: ev.location?.name || 'Paris',
-              tags:         '',
-            }));
-            console.log('[Events] OpenAgenda JSON OK:', results.length);
-          }
-        }
-      } catch(e4) { console.warn('[Events] OpenAgenda:', e4.message); }
     }
 
     if (!results) throw new Error('Toutes les sources événements indisponibles');
@@ -1196,8 +1128,6 @@ window.loadEvents = async function(forceRefresh) {
     }
   }
 };
-
-    const sorted2 = null; // nettoyage bloc orphelin supprimé
 
 function getEventImpact(ev) {
   const txt = ((ev.title||'')+(ev.tags||'')+(ev.address_name||'')).toLowerCase();
