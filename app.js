@@ -684,50 +684,115 @@ function getElapsedDays() {
 window.generateIAReport = async function() {
   const iaEl  = $('ia-report');
   const dotEl = $('ia-dots');
-  if (!iaEl || state.totalGain === 0) return;
+  if (!iaEl) return;
   dotEl?.classList.add('active');
-  iaEl.textContent = 'Analyse en cours...';
+  iaEl.textContent = '⭐ Coach analyse vos données...';
 
-  const conso    = parseFloat(ls('wob_conso')) || 6.5;
-  const prixCarb = parseFloat(ls('wob_prix'))  || 1.85;
-  const fuel     = state.totalKm * (conso / 100) * prixCarb;
-  const totalDep = state.depenses.reduce((s, d) => s + d.montant, 0);
-  const net      = state.totalGain - fuel - totalDep;
-  const ratio    = state.totalKm > 0 ? net / state.totalKm : 0;
-  const avg      = state.totalTrips > 0 ? state.totalGain / state.totalTrips : 0;
+  // ── Collecte des données courses de la semaine ──
+  const rides   = (() => { try { return JSON.parse(ls('wob_rides') || '[]'); } catch { return []; } })();
+  const conso   = parseFloat(ls('wob_conso')) || 6.5;
+  const prixC   = parseFloat(ls('wob_prix'))  || 1.85;
+  const vehType = ls('wob_veh_type') || 'essence';
 
-  // Données mensuelles
-  const monthly  = JSON.parse(ls('wob_monthly') || '[]');
-  const nbMonths = monthly.length;
+  // Stats de base
+  const nb     = rides.length;
+  const brut   = rides.reduce((s,r) => s+r.price, 0);
+  const km     = rides.reduce((s,r) => s+(r.km||0), 0);
+  const mins   = rides.reduce((s,r) => s+(r.minutes||0), 0);
+  const avg    = nb > 0 ? brut/nb : 0;
+  const fuel   = km * (conso/100) * prixC;
+  const net    = brut - fuel;
+  const hRate  = mins > 0 ? net/(mins/60) : 0;
+  const avgKm  = nb > 0 ? km/nb : 0;
+  const avgMin = nb > 0 ? mins/nb : 0;
 
-  // Construire le résumé pour l'IA
-  let monthlyLines = '';
-  monthly.forEach(m => {
-    monthlyLines += `\n• ${m.month} (${m.platform}) : ${m.totalTTC?.toFixed(2) || m.gain?.toFixed(2) || '?'}€ bruts · ${m.trips} courses`;
-    if (m.weeklyBreakdown && Object.keys(m.weeklyBreakdown).length > 0) {
-      Object.entries(m.weeklyBreakdown).sort().forEach(([wk, val]) => {
-        monthlyLines += `\n    - ${wk} : ${val.toFixed(2)}€`;
-      });
+  // Répartition horaire
+  const byHour = {};
+  rides.forEach(r => {
+    if (r.date) {
+      const h = new Date(r.date).getHours();
+      byHour[h] = (byHour[h]||0) + r.price;
     }
   });
+  const bestHour = Object.entries(byHour).sort((a,b)=>b[1]-a[1])[0];
+  const bestHourStr = bestHour ? `${bestHour[0]}h-${parseInt(bestHour[0])+1}h` : null;
 
-  const prompt = `Tu es un assistant expert VTC. Génère une analyse concise en français (3-5 phrases + conseils).
+  // Données trafic / météo / zones disponibles dans l'app
+  const trafficData   = window._lastTrafficData   || null;
+  const meteoData     = window._lastMeteoData     || null;
+  const rushData      = window._lastRushData      || null;
 
-RÈGLE ABSOLUE : chaque fichier CSV = UN mois complet. Le revenu mensuel = somme de TOUS les Prix TTC des courses de ce mois. Ne jamais extrapoler annuellement à partir d'un seul mois.
+  // Contexte trafic
+  let trafficContext = '';
+  if (trafficData?.zones?.length > 0) {
+    const worst = trafficData.zones.filter(z => z.cls === 'danger' || z.cls === 'warn').slice(0,3);
+    if (worst.length) trafficContext = `Embouteillages actuels : ${worst.map(z=>`${z.nom} +${z.delayMin||'?'}min`).join(', ')}.`;
+  }
 
-Données par mois importé (${nbMonths} mois) :${monthlyLines || '\n• Pas de détail mensuel disponible'}
+  // Contexte météo
+  let meteoContext = '';
+  if (meteoData) {
+    meteoContext = `Météo Paris : ${meteoData.desc || ''}, ${meteoData.temp ? meteoData.temp+'°C' : ''}, ${meteoData.impact || ''}.`;
+  }
 
-Totaux cumulés (${nbMonths} mois confondus) :
-- Gains bruts : ${state.totalGain.toFixed(2)}€
-- Courses : ${state.totalTrips}
-- Distance : ${state.totalKm.toFixed(0)} km${state.totalKm > 0 ? '' : ' (non renseignée)'}
-- Carburant estimé : ${fuel.toFixed(2)}€
-- Dépenses pro : ${totalDep.toFixed(2)}€
-- Bénéfice net estimé : ${net.toFixed(2)}€
-- Moyenne par course : ${avg.toFixed(2)}€/course
-- Véhicule : ${ls('wob_veh_type') || 'essence'}
+  // Zones chaudes
+  let zoneContext = '';
+  if (rushData?.hotZones?.length > 0) {
+    zoneContext = `Zones chaudes en ce moment : ${rushData.hotZones.slice(0,4).join(', ')}.`;
+  }
 
-Fournis : performance mensuelle, comparaison des semaines si disponible, 2 conseils concrets pour optimiser les revenus.`;
+  // Varier le focus du conseil à chaque appel (timestamp pour randomiser)
+  const focusIndex = Math.floor(Date.now() / 1000) % 8;
+  const FOCUS_LABELS = [
+    'rentabilité et tarif horaire',
+    'optimisation des créneaux horaires',
+    'zones et positionnement géographique',
+    'réduction des kilomètres à vide',
+    'sélection des courses les plus rentables',
+    'gestion du carburant et des coûts',
+    'stratégie face aux embouteillages',
+    'maximisation du revenu par heure',
+  ];
+  const focus = FOCUS_LABELS[focusIndex];
+
+  // Si pas encore de courses cette semaine
+  if (nb === 0) {
+    const prompts = [
+      "Aucune course enregistrée cette semaine. Début de semaine : positionne-toi dès 7h en ZAG (Zone Aéroport de Gaulle) — les transfers d'affaires matinaux sont les plus rentables (>20€/course). Évite le périphérique avant 9h.",
+      "Pas encore de données cette semaine. Conseil préventif : les dimanches soirs 17h-22h autour des gares TGV (Montparnasse, Lyon, St-Lazare) génèrent jusqu'à 30% de revenus en plus grâce aux retours de week-end.",
+      "Semaine vierge. Analyse des patterns gagnants en IDF : les créneaux 7h-9h et 18h-21h en semaine, couplés au positionnement Défense-Centre, donnent un ratio net/km 40% supérieur aux heures creuses.",
+    ];
+    const txt = prompts[Math.floor(Date.now() / 60000) % prompts.length];
+    iaEl.textContent = txt;
+    setLS('wob_ia', txt);
+    dotEl?.classList.remove('active');
+    return;
+  }
+
+  const prompt = `Tu es un coach expert VTC parisien de haut niveau. Tu analyses les données réelles d'un chauffeur et fournis des conseils d'expert ultra-précis, concrets et directement actionnables.
+
+RÈGLES STRICTES :
+- Concentre-toi UNIQUEMENT sur des conseils pour améliorer les revenus, les trajets, le positionnement, l'activité
+- Ne répète PAS les chiffres bruts déjà affichés dans l'appli (pas de "tu as fait X courses à Y€")
+- PAS de prévisions ou projections
+- Focus de cette analyse : ${focus}
+- Ton expert, professionnel, engagé — comme un manager de flotte qui parle à son meilleur chauffeur
+- 3-4 phrases percutantes maximum, style direct et motivant
+
+DONNÉES COURSES (semaine en cours) :
+- ${nb} courses · brut ${brut.toFixed(2)}€ · net estimé ${net.toFixed(2)}€
+- Tarif horaire net : ${hRate.toFixed(2)}€/h · Moyenne par course : ${avg.toFixed(2)}€
+- Distance moyenne/course : ${avgKm.toFixed(1)} km · Durée moyenne : ${avgMin.toFixed(0)} min
+- Km totaux : ${km.toFixed(0)} km · Carburant : ${fuel.toFixed(2)}€
+- Véhicule : ${vehType} · Conso : ${conso}L/100km à ${prixC}€/L
+- Meilleur créneau horaire : ${bestHourStr || 'non déterminé'}
+
+CONTEXTE TEMPS RÉEL :
+${trafficContext || 'Trafic : données non disponibles.'}
+${meteoContext || 'Météo : non disponible.'}
+${zoneContext || ''}
+
+Génère maintenant tes conseils d'expert en français, focalisés sur : ${focus}.`;
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -735,29 +800,32 @@ Fournis : performance mensuelle, comparaison des semaines si disponible, 2 conse
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
+        max_tokens: 400,
         messages: [{ role: 'user', content: prompt }]
       })
     });
     if (!resp.ok) throw new Error(`API ${resp.status}`);
     const data = await resp.json();
-    const text = data.content?.map(c => c.text || '').join('') || '';
+    const text = data.content?.map(c => c.text || '').join('').trim() || '';
     iaEl.textContent = text;
     setLS('wob_ia', text);
+    setLS('wob_ia_ts', Date.now().toString());
   } catch {
-    // Fallback local
-    const bestMonth = monthly.length > 0
-      ? monthly.reduce((a, b) => ((a.totalTTC||a.gain||0) > (b.totalTTC||b.gain||0) ? a : b))
-      : null;
-    const txt = `📊 ${nbMonths} mois importé(s) · ${state.totalTrips} courses · ${state.totalGain.toFixed(2)}€ bruts.`
-      + (bestMonth ? ` Meilleur mois : ${bestMonth.month} (${(bestMonth.totalTTC||bestMonth.gain||0).toFixed(2)}€).` : '')
-      + ` Moyenne : ${avg.toFixed(2)}€/course. Optimisez vos créneaux CDG/Orly pour augmenter la moyenne.`;
+    // Fallback local — conseil rotatif expert
+    const FALLBACKS = [
+      `💡 Ton tarif horaire net de ${hRate.toFixed(2)}€/h ${hRate > 25 ? 'est excellent — maintiens ce rythme en restant sur les zones Défense/Opera.' : 'peut progresser — concentre-toi sur les courses >15€ et évite les trajets <10min.'}`,
+      `🗺️ Positionnement stratégique : ${avgKm < 8 ? 'tes courses courtes indiquent une zone urbaine dense — cibles les hôtels 4★ et gares pour des trajets plus longs et mieux rémunérés.' : 'bonne longueur moyenne — optimise les retours en ciblant CDG et Orly pour éviter les km à vide.'}`,
+      `⏱️ ${bestHourStr ? `Ton créneau le plus rentable est ${bestHourStr} — bloc ces heures en priorité et évite les créneaux creux qui diluent ton tarif horaire.` : 'Analyse tes créneaux horaires — les 7h-9h et 18h-21h en semaine sont généralement les pics de rentabilité en IDF.'}`,
+      `⛽ ${km > 0 ? `Avec ${(fuel/brut*100).toFixed(0)}% de tes revenus en carburant, ${fuel/brut > 0.15 ? 'tu dépasses le seuil optimal (15%) — réduis les km à vide en te positionnant mieux entre les courses.' : 'ta gestion carburant est efficace — maintiens cette discipline.'}` : 'Renseigne tes kilomètres pour que le coach puisse optimiser ton ratio carburant/revenu.'}`,
+    ];
+    const txt = FALLBACKS[Math.floor(Date.now() / 30000) % FALLBACKS.length];
     iaEl.textContent = txt;
     setLS('wob_ia', txt);
   } finally {
     dotEl?.classList.remove('active');
   }
 };
+
 
 // ══════════════════════════════════════════════════
 //  CHARTS
@@ -948,6 +1016,13 @@ window.loadTraffic = async function() {
   zonesEl.innerHTML = `<div class="list-item info">Calcul des trajets...</div>`;
 
   const results = await Promise.all(IDF_ZONES.map(z => fetchRoute(z)));
+
+  // Exposer les données trafic pour le coach IA
+  window._lastTrafficData = {
+    zones: IDF_ZONES.map((z,i) => results[i] ? { nom: z.nom, ...results[i] } : null).filter(Boolean),
+    ts: Date.now(),
+  };
+
   let html = '';
   IDF_ZONES.forEach((z,i) => {
     const r = results[i];

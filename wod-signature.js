@@ -204,14 +204,13 @@ const WOD_IMG = {
 };
 
 // ══════════════════════════════════════════════════════════════
-//  SHOOTING STAR BACKGROUND — traînée LED étoile filante
+//  SHOOTING STAR BACKGROUND — étoile filante scintillante + illumination widgets
 // ══════════════════════════════════════════════════════════════
 const WOD_STARS = (() => {
   let canvas, ctx2d, raf, w, h;
   let stars = [];
   let lastSpawn = 0;
-  // Intervalle aléatoire entre les étoiles filantes : 7–18 secondes
-  let nextSpawn = 9000;
+  let nextSpawn = 7000;
 
   function initCanvas() {
     try {
@@ -220,11 +219,11 @@ const WOD_STARS = (() => {
       canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;opacity:1;';
       document.body.insertBefore(canvas, document.body.firstChild);
       ctx2d = canvas.getContext('2d');
-      if (!ctx2d) { console.warn('[WOD Stars] Canvas 2D non disponible'); return false; }
+      if (!ctx2d) return false;
       resize();
       window.addEventListener('resize', resize);
       return true;
-    } catch(e) { console.warn('[WOD Stars] initCanvas:', e.message); return false; }
+    } catch(e) { console.warn('[WOD Stars]', e.message); return false; }
   }
 
   function resize() {
@@ -234,80 +233,175 @@ const WOD_STARS = (() => {
   }
 
   function spawnStar() {
-    // Direction : toujours de coin supérieur-gauche vers coin inférieur-droit (± variance)
-    const side = Math.random() < 0.6 ? 'top' : 'left';
+    const side = Math.random() < 0.65 ? 'top' : 'left';
     let x0, y0;
-    if (side === 'top') {
-      x0 = Math.random() * w * 0.7;
-      y0 = -10;
-    } else {
-      x0 = -10;
-      y0 = Math.random() * h * 0.6;
-    }
-    const angle   = (Math.PI / 4) + (Math.random() - 0.5) * 0.4; // ~45° ± 23°
-    const speed   = 280 + Math.random() * 220;          // px/s
-    const length  = 80 + Math.random() * 120;           // longueur traînée
-    const life    = (w * 1.6) / speed;                  // secondes jusqu'à sortie
-    const hue     = Math.random() < 0.75 ? 42 : 200;    // or ou bleu glace
-    stars.push({ x: x0, y: y0, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed,
-                 length, life, age: 0, hue, alpha: 0, peak: life*0.12 });
+    if (side === 'top') { x0 = Math.random() * w * 0.75; y0 = -10; }
+    else                { x0 = -10; y0 = Math.random() * h * 0.6; }
+
+    const angle  = (Math.PI / 4) + (Math.random() - 0.5) * 0.45;
+    const speed  = 320 + Math.random() * 240;
+    const length = 100 + Math.random() * 160;
+    const life   = (w * 1.8) / speed;
+    const isGold = Math.random() < 0.72;
+    const hue    = isGold ? 42 : 195;
+
+    // Scintillement : tableau de phases aléatoires
+    const sparkCount = 4 + Math.floor(Math.random() * 5);
+    const sparks = Array.from({length: sparkCount}, () => ({
+      phase: Math.random(),         // 0-1 dans la vie de l'étoile
+      duration: 0.04 + Math.random() * 0.06,
+      intensity: 0.6 + Math.random() * 0.4,
+    }));
+
+    stars.push({
+      x: x0, y: y0,
+      vx: Math.cos(angle)*speed,
+      vy: Math.sin(angle)*speed,
+      length, life, age: 0, hue, alpha: 0, peak: life*0.12,
+      sparks,
+      sparkAlpha: 0,         // sur-brillance instantanée
+      width: 1.8 + Math.random() * 0.8,
+      glowSize: 10 + Math.random() * 8,
+    });
+  }
+
+  // Illuminer les cartes sous l'étoile filante
+  function illuminateWidgets(x, y, alpha) {
+    if (alpha < 0.3) return;
+    const cards = document.querySelectorAll('.card, .hero-card, .msl-card');
+    cards.forEach(card => {
+      const rect = card.getBoundingClientRect();
+      // Distance du centre de la carte à la tête de l'étoile
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top  + rect.height / 2;
+      const dist = Math.sqrt((x - cx)**2 + (y - cy)**2);
+      const maxDist = Math.max(rect.width, rect.height) * 1.6;
+      if (dist < maxDist) {
+        const strength = Math.max(0, 1 - dist / maxDist) * alpha * 0.85;
+        card.style.setProperty('--star-glow', strength.toFixed(3));
+        // Retirer l'effet après 600ms
+        clearTimeout(card._starTimer);
+        card._starTimer = setTimeout(() => card.style.removeProperty('--star-glow'), 600);
+      }
+    });
   }
 
   function draw(ts) {
     raf = requestAnimationFrame(draw);
-    if (!ctx2d) return; // guard — évite le crash clearRect
+    if (!ctx2d) return;
     try { ctx2d.clearRect(0, 0, w, h); } catch(e) { return; }
 
-    // Spawn aléatoire rare
     if (!lastSpawn) lastSpawn = ts;
     if (ts - lastSpawn > nextSpawn) {
       spawnStar();
       lastSpawn = ts;
-      nextSpawn = 7000 + Math.random() * 11000; // 7–18 s
+      nextSpawn = 6000 + Math.random() * 10000; // 6–16s
     }
 
     const dt = 1/60;
-    stars = stars.filter(s => s.age < s.life + 0.4);
+    stars = stars.filter(s => s.age < s.life + 0.5);
 
     stars.forEach(s => {
       s.age += dt;
       s.x += s.vx * dt;
       s.y += s.vy * dt;
 
-      // Fade in / out
       const progress = s.age / s.life;
-      if (progress < 0.15)      s.alpha = progress / 0.15 * 0.72;
-      else if (progress < 0.75) s.alpha = 0.72;
-      else                       s.alpha = (1 - (progress - 0.75) / 0.25) * 0.72;
-      s.alpha = Math.max(0, Math.min(s.alpha, 0.72));
 
-      // Traînée dégradée
-      const tailX = s.x - Math.cos(Math.atan2(s.vy,s.vx)) * s.length;
-      const tailY = s.y - Math.sin(Math.atan2(s.vy,s.vx)) * s.length;
+      // Fade in/out
+      if (progress < 0.12)      s.alpha = progress / 0.12 * 0.88;
+      else if (progress < 0.70) s.alpha = 0.88;
+      else                      s.alpha = (1 - (progress - 0.70) / 0.30) * 0.88;
+      s.alpha = Math.max(0, Math.min(s.alpha, 0.88));
 
-      const grad = ctx2d.createLinearGradient(tailX, tailY, s.x, s.y);
-      grad.addColorStop(0,   `hsla(${s.hue},85%,65%,0)`);
-      grad.addColorStop(0.6, `hsla(${s.hue},90%,75%,${s.alpha * 0.4})`);
-      grad.addColorStop(1,   `hsla(${s.hue},95%,90%,${s.alpha})`);
+      // Scintillement : sur-brillance ponctuelle aux phases définies
+      s.sparkAlpha = 0;
+      for (const sp of s.sparks) {
+        const dist = Math.abs(progress - sp.phase);
+        if (dist < sp.duration) {
+          s.sparkAlpha = Math.max(s.sparkAlpha, sp.intensity * (1 - dist / sp.duration));
+        }
+      }
+      const totalAlpha = Math.min(1, s.alpha + s.sparkAlpha * 0.5);
+      const lineWidth  = s.width + s.sparkAlpha * 1.8;
+      const glowBlur   = s.glowSize + s.sparkAlpha * 18;
+
+      // Direction et traînée
+      const dir  = Math.atan2(s.vy, s.vx);
+      const tailX = s.x - Math.cos(dir) * s.length;
+      const tailY = s.y - Math.sin(dir) * s.length;
 
       ctx2d.save();
       ctx2d.globalCompositeOperation = 'screen';
+
+      // ── Traînée principale dégradée ──
+      const grad = ctx2d.createLinearGradient(tailX, tailY, s.x, s.y);
+      grad.addColorStop(0,   `hsla(${s.hue},85%,65%,0)`);
+      grad.addColorStop(0.5, `hsla(${s.hue},90%,78%,${totalAlpha * 0.3})`);
+      grad.addColorStop(0.85,`hsla(${s.hue},95%,88%,${totalAlpha * 0.7})`);
+      grad.addColorStop(1,   `hsla(${s.hue},100%,97%,${totalAlpha})`);
+
       ctx2d.strokeStyle = grad;
-      ctx2d.lineWidth   = 1.5;
-      ctx2d.shadowColor = `hsla(${s.hue},90%,80%,0.6)`;
-      ctx2d.shadowBlur  = 6;
+      ctx2d.lineWidth   = lineWidth;
+      ctx2d.shadowColor = `hsla(${s.hue},90%,82%,${0.5 + s.sparkAlpha * 0.4})`;
+      ctx2d.shadowBlur  = glowBlur;
+      ctx2d.lineCap     = 'round';
       ctx2d.beginPath();
       ctx2d.moveTo(tailX, tailY);
       ctx2d.lineTo(s.x, s.y);
       ctx2d.stroke();
 
-      // Point lumineux de tête
+      // ── Halo extérieur large (glow ambiant) ──
+      ctx2d.lineWidth   = lineWidth * 3.5;
+      ctx2d.shadowBlur  = glowBlur * 2.2;
+      const gradGlow = ctx2d.createLinearGradient(tailX, tailY, s.x, s.y);
+      gradGlow.addColorStop(0, `hsla(${s.hue},80%,60%,0)`);
+      gradGlow.addColorStop(1, `hsla(${s.hue},90%,80%,${totalAlpha * 0.15})`);
+      ctx2d.strokeStyle = gradGlow;
+      ctx2d.stroke();
+
+      // ── Tête : boule lumineuse scintillante ──
+      const headR = 2.2 + s.sparkAlpha * 2.5;
+      ctx2d.shadowBlur  = glowBlur + s.sparkAlpha * 25;
+      ctx2d.shadowColor = `hsla(${s.hue},100%,95%,${totalAlpha})`;
+
+      // Halo de tête
+      const headGrad = ctx2d.createRadialGradient(s.x, s.y, 0, s.x, s.y, headR * 4);
+      headGrad.addColorStop(0,   `hsla(${s.hue},100%,100%,${totalAlpha})`);
+      headGrad.addColorStop(0.4, `hsla(${s.hue},95%,90%,${totalAlpha * 0.7})`);
+      headGrad.addColorStop(1,   `hsla(${s.hue},90%,80%,0)`);
+      ctx2d.fillStyle = headGrad;
       ctx2d.beginPath();
-      ctx2d.arc(s.x, s.y, 1.8, 0, Math.PI*2);
-      ctx2d.fillStyle = `hsla(${s.hue},100%,95%,${s.alpha})`;
-      ctx2d.shadowBlur = 12;
+      ctx2d.arc(s.x, s.y, headR * 4, 0, Math.PI*2);
       ctx2d.fill();
+
+      // Cœur blanc pur
+      ctx2d.fillStyle = `hsla(0,0%,100%,${totalAlpha})`;
+      ctx2d.beginPath();
+      ctx2d.arc(s.x, s.y, headR, 0, Math.PI*2);
+      ctx2d.fill();
+
+      // ── Micro-étincelles lors des scintillements ──
+      if (s.sparkAlpha > 0.3) {
+        const ns = 3 + Math.floor(s.sparkAlpha * 5);
+        for (let i = 0; i < ns; i++) {
+          const sa  = (Math.PI*2 * i / ns) + s.age * 8;
+          const sr  = (4 + s.sparkAlpha * 6) * (0.5 + Math.random() * 0.5);
+          const sx  = s.x + Math.cos(sa) * sr;
+          const sy  = s.y + Math.sin(sa) * sr;
+          const sz  = 0.5 + s.sparkAlpha * 1.2;
+          ctx2d.fillStyle = `hsla(${s.hue},100%,95%,${s.sparkAlpha * 0.8})`;
+          ctx2d.shadowBlur = 8;
+          ctx2d.beginPath();
+          ctx2d.arc(sx, sy, sz, 0, Math.PI*2);
+          ctx2d.fill();
+        }
+      }
+
       ctx2d.restore();
+
+      // Illuminer les widgets sous l'étoile (peak alpha seulement)
+      if (s.alpha > 0.5) illuminateWidgets(s.x, s.y, s.alpha + s.sparkAlpha * 0.5);
     });
   }
 
@@ -316,11 +410,33 @@ const WOD_STARS = (() => {
       try {
         const ok = initCanvas();
         if (!ok) return;
+        // CSS pour l'effet de brillance sur les cartes
+        if (!document.getElementById('wod-star-glow-css')) {
+          const st = document.createElement('style');
+          st.id = 'wod-star-glow-css';
+          st.textContent = `
+            .card, .hero-card, .msl-card {
+              transition: box-shadow 0.15s ease, border-color 0.15s ease;
+            }
+            .card:has(--star-glow),
+            .card[style*="--star-glow"],
+            .hero-card[style*="--star-glow"],
+            .msl-card[style*="--star-glow"] {
+              box-shadow:
+                0 0 calc(var(--star-glow, 0) * 40px) rgba(212,168,67, calc(var(--star-glow, 0) * 0.7)),
+                0 0 calc(var(--star-glow, 0) * 80px) rgba(212,168,67, calc(var(--star-glow, 0) * 0.25)),
+                inset 0 0 calc(var(--star-glow, 0) * 20px) rgba(212,168,67, calc(var(--star-glow, 0) * 0.15)) !important;
+              border-color: rgba(212,168,67, calc(var(--star-glow, 0) * 0.8 + 0.08)) !important;
+            }
+          `;
+          document.head.appendChild(st);
+        }
         raf = requestAnimationFrame(draw);
       } catch(e) { console.warn('[WOD Stars] init:', e.message); }
     }
   };
 })();
+
 
 // ══════════════════════════════════════════════════════════════
 //  NEON + FULL THEME STYLES — injectés en CSS

@@ -223,18 +223,16 @@ const CARBURANT = {
       const idfWhere  = `region_name="Ile-de-France" AND prix_valeur > 0`;
       const geoWhere  = `distance(geom, geom'POINT(${lon} ${lat})', 8000m) AND prix_valeur > 0`;
       const select    = 'adresse,ville,prix_valeur,prix_nom';
-      // URLs ordonnées par probabilité de succès CORS
+      // URLs ordonnées par fiabilité — audit endpoints juin 2026
       const URLS = [
-        // ★ Endpoint data.gouv.fr — CORS OK (vérifié 2025)
+        // ★ Principal — instantané v2, CORS OK, mis à jour toutes 10min
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=${encodeURIComponent(geoWhere)}&limit=40&select=${select}`,
-        // Variante région IDF (sans filtre géo)
+        // Fallback IDF (sans filtre géo précis)
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
-        // Variante underscore
-        `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix_des_carburants_en_france_flux_instantane_v2/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
-        // Dataset J-1 (parfois plus stable)
+        // Fallback J-1 (données du jour précédent, stable)
         `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-j-1/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
-        // Fallback open data carbu historique
-        `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-carburants-fichier-instantane-test-ods-copie/records?where=${encodeURIComponent(idfWhere)}&limit=80&select=${select}`,
+        // SUPPRIMÉ: prix_des_carburants_en_france_flux_instantane_v2 (underscore) — alias instable
+        // SUPPRIMÉ: prix-carburants-fichier-instantane-test-ods-copie — dataset de test mort
       ];
       let data = null;
       for (const url of URLS) {
@@ -628,35 +626,10 @@ const NAVITIA = {
 
     let disruptions = null;
 
-    // Source 1 — IDFM Open Data perturbations (CORS OK depuis browser)
-    if (isKeySet(WOB_CONFIG.IDFM_KEY)) {
-      try {
-        // Dataset perturbations IDFM — endpoint CORS-autorisé
-        const url = 'https://prim.iledefrance-mobilites.fr/marketplace/disruptions-temps-reel/disruptions?count=50';
-        const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 10000);
-        const resp = await fetch(url, {
-          signal: ctrl.signal,
-          headers: {
-            'apikey': WOB_CONFIG.IDFM_KEY,
-            'Accept': 'application/json',
-          },
-        });
-        clearTimeout(tid);
-        if (resp.ok) {
-          const data = await resp.json();
-          disruptions = this.parseDisruptions(data.disruptions || data.data || []);
-          LOG('IDFM PRIM disruptions OK:', disruptions.alerts.length, 'alertes');
-        } else {
-          ERR('IDFM PRIM HTTP:', resp.status, resp.status === 403 ? '— CORS bloqué, essai fallback' : '');
-        }
-      } catch(e) {
-        ERR('IDFM PRIM:', e.message, '— essai source alternative');
-      }
-    }
-
-    // Source 2 — Navitia.io (si PRIM échoue)
-    if (!disruptions && isKeySet(WOB_CONFIG.NAVITIA_KEY)) {
+    // Source 1 — Navitia.io (CORS OK, clé configurée, PRIMAIRE)
+    // ⚠️ PRIM disruptions-temps-reel requiert un token PRIM distinct (≠ Navitia) → non configuré → 401
+    // Navitia.io = API publique avec la clé NAVITIA_KEY, fonctionne directement
+    if (isKeySet(WOB_CONFIG.NAVITIA_KEY)) {
       try {
         const url = 'https://api.navitia.io/v1/coverage/fr-idf/disruptions?count=50&depth=1';
         const ctrl = new AbortController();
@@ -678,7 +651,7 @@ const NAVITIA = {
       }
     }
 
-    // Source 3 — IDFM Open Data v2.1 (sans clé, CORS OK, données moins précises)
+    // Source 2 — IDFM Open Data v2.1 (sans clé, CORS OK, données routières)
     if (!disruptions) {
       try {
         const url = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/etat-du-reseau-routier-en-ile-de-france/records?limit=10&select=nom,type_perturbation,date_debut';
@@ -686,12 +659,7 @@ const NAVITIA = {
         const tid  = setTimeout(() => ctrl.abort(), 8000);
         const resp = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
         clearTimeout(tid);
-        // Même si vide, on ne crash pas — fallback synthétique
         disruptions = { alerts: [], ts: Date.now(), _synthetic: true };
-        if (resp.ok) {
-          const data = await resp.json();
-          // Pas de données structurées perturbations ici — on utilise le synthétique
-        }
       } catch(e) {
         ERR('IDFM Open Data:', e.message);
       }
@@ -893,53 +861,69 @@ const AVIATION = {
     }
   },
 
-  // Fetch vols via OpenSky Network — gratuit, sans clé, CORS OK
-  // Remplace l'API ADP (domaine opendata.aeroportsde-paris.fr inexistant)
+  // Fetch vols via ADS-B Exchange (gratuit, sans clé, CORS OK, remplace OpenSky)
+  // ⚠️ OpenSky a migré vers OAuth2 en 2024 — basic auth supprimé → BROKEN
+  // ADS-B Exchange /v2/lat/lon/dist/ : CORS OK, pas d'auth, données temps réel
   async _fetchADP(airportCode, direction) {
-    // Boîtes géographiques des aéroports IDF
-    const AIRPORT_BOXES = {
-      CDG: { lamin:48.97, lomin:2.50, lamax:49.05, lomax:2.60 },
-      ORY: { lamin:48.70, lomin:2.33, lamax:48.75, lomax:2.42 },
+    const AIRPORT_POS = {
+      CDG: { lat: 49.009, lon: 2.547 },
+      ORY: { lat: 48.723, lon: 2.379 },
     };
-    const box = AIRPORT_BOXES[airportCode] || AIRPORT_BOXES.CDG;
+    const pos   = AIRPORT_POS[airportCode] || AIRPORT_POS.CDG;
     const isArr = direction === 'ARR';
 
-    // OpenSky Network — flights in bounding box (no key needed, CORS OK)
-    const OPENSKY_URLS = [
-      // Endpoint states (positions en temps réel dans la box)
-      `https://opensky-network.org/api/states/all?lamin=${box.lamin}&lomin=${box.lomin}&lamax=${box.lamax}&lomax=${box.lomax}`,
-      // Fallback : endpoint sans HTTPS strict
-      `https://opensky-network.org/api/states/all?lamin=${box.lamin}&lomin=${box.lomin}&lamax=${box.lamax}&lomax=${box.lomax}`,
+    // ADS-B Exchange — endpoint public, CORS *, pas d'auth requise
+    const URLS = [
+      `https://api.adsb.lol/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15`,
+      `https://adsbexchange-com1.p.rapidapi.com/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15/`,
     ];
 
-    for (const url of OPENSKY_URLS) {
+    for (const url of URLS) {
       try {
         const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 10000);
+        const tid  = setTimeout(() => ctrl.abort(), 9000);
         const resp = await fetch(url, {
           signal: ctrl.signal,
           headers: { 'Accept': 'application/json' },
         });
         clearTimeout(tid);
-        if (!resp.ok) { ERR('OpenSky HTTP', resp.status); continue; }
+        if (!resp.ok) { ERR('ADSB HTTP', resp.status); continue; }
         const json = await resp.json();
-        const states = json.states || [];
-        if (!states.length) continue;
+        const acs = json.ac || json.aircraft || [];
+        if (!acs.length) continue;
 
-        LOG(`OpenSky ${airportCode} ${direction}: ${states.length} appareils détectés`);
-        // Normaliser le format OpenSky → format interne WOD
-        const flights = states.slice(0, 12).map(s => this._normalizeOpenSky(s, direction, airportCode));
+        LOG(`ADSB ${airportCode} ${direction}: ${acs.length} appareils`);
+        const flights = acs.slice(0, 12).map(a => this._normalizeADSB(a, direction, airportCode));
         return flights;
-      } catch(e) { ERR('OpenSky URL:', e.message); }
+      } catch(e) { ERR('ADSB URL:', e.message); }
     }
     return null;
   },
 
-  // Normaliser format OpenSky → format interne WOD
-  // [icao24, callsign, origin_country, time_position, last_contact,
-  //  longitude, latitude, baro_altitude, on_ground, velocity,
-  //  true_track, vertical_rate, sensors, geo_altitude, squawk, spi, position_source]
-  _normalizeOpenSky(state, direction, airport) {
+  // Normaliser format ADS-B Exchange → format interne WOD
+  _normalizeADSB(ac, direction, airport) {
+    const callsign  = (ac.flight || ac.r || '').trim();
+    const onGround  = ac.alt_baro === 'ground' || ac.gs < 30;
+    const altitude  = typeof ac.alt_baro === 'number' ? ac.alt_baro * 0.3048 : 0; // ft → m
+    const velocity  = ac.gs || 0; // knots
+    const isArr     = direction === 'ARR';
+    const isApproaching = isArr && altitude < 3000 && !onGround;
+    const etaOffsetMin  = isApproaching ? Math.max(5, Math.round(altitude / 300)) : 0;
+    const eta = new Date(Date.now() + etaOffsetMin * 60000).toISOString();
+    return {
+      flight:   { iata: callsign || `${airport}???` },
+      airline:  { name: callsign ? callsign.slice(0, 3) : '—' },
+      departure: isArr ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
+      arrival:  !isArr ? { iata: '—', scheduled: eta, estimated: eta, delay: 0 } : null,
+      status:   onGround ? 'landed' : isApproaching ? 'active' : 'en-route',
+      terminal: '',
+      _source:  'adsb',
+      _velocity: Math.round(velocity * 1.852), // knots → km/h
+      _altitude: Math.round(altitude),
+    };
+  },
+
+
     const callsign  = (state[1] || '').trim();
     const onGround  = state[8] === true;
     const velocity  = state[9] || 0; // m/s
