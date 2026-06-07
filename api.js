@@ -619,53 +619,26 @@ const NAVITIA = {
     const cached = getCached('wob_navitia', WOB_CONFIG.CACHE_TTL.navitia);
     if (cached) { this.render(cached); return; }
 
-    // Stratégie multi-sources CORS-safe :
-    // 1. IDFM Open Data (data.iledefrance-mobilites.fr) — CORS OK, clé en header
-    // 2. Navitia.io direct — CORS OK si clé valide
-    // 3. Fallback synthétique basé sur heure/jour
+    // ── STRATÉGIE 3 SOURCES (ordre de fiabilité) ──────────────────
+    // 1. PRIM IDFM /general-message — API officielle SNCF/RATP IDF
+    //    CORS * autorisé depuis navigateur · Clé IDFM_KEY · Temps réel
+    // 2. Open Data IDFM perturbations — Sans clé · CORS OK navigateur
+    // 3. Fallback intelligent basé sur heure/jour de la semaine
+    // ─────────────────────────────────────────────────────────────
 
     let disruptions = null;
 
-    // Source 1 — Navitia.io (CORS OK, clé configurée, PRIMAIRE)
-    // ⚠️ PRIM disruptions-temps-reel requiert un token PRIM distinct (≠ Navitia) → non configuré → 401
-    // Navitia.io = API publique avec la clé NAVITIA_KEY, fonctionne directement
-    if (isKeySet(WOB_CONFIG.NAVITIA_KEY)) {
-      try {
-        const url = 'https://api.navitia.io/v1/coverage/fr-idf/disruptions?count=50&depth=1';
-        const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 10000);
-        const resp = await fetch(url, {
-          signal: ctrl.signal,
-          headers: { 'Authorization': WOB_CONFIG.NAVITIA_KEY, 'Accept': 'application/json' },
-        });
-        clearTimeout(tid);
-        if (resp.ok) {
-          const data = await resp.json();
-          disruptions = this.parseDisruptions(data.disruptions || []);
-          LOG('Navitia.io OK:', disruptions.alerts.length, 'alertes');
-        } else {
-          ERR('Navitia.io HTTP:', resp.status);
-        }
-      } catch(e) {
-        ERR('Navitia.io:', e.message);
-      }
+    // ── SOURCE 1 : PRIM IDFM (principal, temps réel officiel) ────
+    if (isKeySet(WOB_CONFIG.IDFM_KEY)) {
+      disruptions = await this._fetchPRIM();
     }
 
-    // Source 2 — IDFM Open Data v2.1 (sans clé, CORS OK, données routières)
+    // ── SOURCE 2 : Open Data IDFM perturbations (sans clé) ───────
     if (!disruptions) {
-      try {
-        const url = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/etat-du-reseau-routier-en-ile-de-france/records?limit=10&select=nom,type_perturbation,date_debut';
-        const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 8000);
-        const resp = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
-        clearTimeout(tid);
-        disruptions = { alerts: [], ts: Date.now(), _synthetic: true };
-      } catch(e) {
-        ERR('IDFM Open Data:', e.message);
-      }
+      disruptions = await this._fetchOpenDataIDFM();
     }
 
-    // Fallback ultime — synthétique basé sur heure/jour
+    // ── SOURCE 3 : Fallback synthétique heure/jour ────────────────
     if (!disruptions) {
       disruptions = this._buildSyntheticDisruptions();
     }
@@ -673,6 +646,169 @@ const NAVITIA = {
     setCache('wob_navitia', disruptions);
     this.render(disruptions);
     if (disruptions.alerts?.length > 0) IA_ZONES.addTransitAlerts(disruptions.alerts);
+  },
+
+  // ── PRIM IDFM /general-message ──────────────────────────────────
+  // API officielle IDF Mobilités — CORS * depuis navigateur — Temps réel
+  async _fetchPRIM() {
+    try {
+      // general-message retourne toutes les perturbations réseau IDF
+      const url = 'https://prim.iledefrance-mobilites.fr/marketplace/general-message';
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 10000);
+      const resp = await fetch(url, {
+        signal: ctrl.signal,
+        headers: {
+          'apikey': WOB_CONFIG.IDFM_KEY,
+          'Accept': 'application/json',
+        },
+      });
+      clearTimeout(tid);
+
+      if (!resp.ok) {
+        ERR('PRIM HTTP:', resp.status, resp.statusText);
+        // 401 = clé invalide, 403 = droits insuffisants
+        if (resp.status === 401 || resp.status === 403) {
+          ERR('PRIM: Clé IDFM_KEY invalide ou expirée → https://prim.iledefrance-mobilites.fr');
+        }
+        return null;
+      }
+
+      const data = await resp.json();
+      LOG('PRIM OK — parsing réponse...');
+      return this._parsePRIM(data);
+    } catch(e) {
+      ERR('PRIM fetch:', e.message);
+      return null;
+    }
+  },
+
+  // Parser le format SIRI/JSON de PRIM general-message
+  _parsePRIM(data) {
+    const alerts = [];
+    // Structure PRIM: Siri.ServiceDelivery.GeneralMessageDelivery[].InfoMessage[]
+    const delivery = data?.Siri?.ServiceDelivery?.GeneralMessageDelivery;
+    if (!delivery) {
+      LOG('PRIM: Structure inattendue —', Object.keys(data || {}).join(', '));
+      return { alerts: [], ts: Date.now(), _source: 'prim_empty' };
+    }
+
+    const deliveries = Array.isArray(delivery) ? delivery : [delivery];
+    deliveries.forEach(d => {
+      const messages = d.InfoMessage || [];
+      (Array.isArray(messages) ? messages : [messages]).forEach(msg => {
+        const content   = msg.Content || {};
+        const lineRefs  = content.LineRef || [];
+        const refs      = Array.isArray(lineRefs) ? lineRefs : [lineRefs];
+        const msgText   = content.Message?.MessageText?.value || content.Message?.value || '';
+        const severity  = content.Severity || 'unknown';
+        const isMajor   = ['noService', 'significantDelays', 'verySignificantDelays', 'longDelay'].includes(severity);
+
+        // Mapper sur nos lignes clés
+        refs.forEach(ref => {
+          const refStr = typeof ref === 'string' ? ref : (ref?.value || '');
+          const keyLine = this.KEY_LINES.find(kl => refStr.includes(kl.id) ||
+            refStr.includes(kl.name.replace('Ligne ','').replace('RER ',''))
+          );
+          if (!keyLine || !msgText) return;
+          alerts.push({
+            line:    keyLine.name,
+            icon:    keyLine.icon,
+            impact:  keyLine.impact,
+            severity,
+            isMajor,
+            msg:     msgText.slice(0, 150),
+            zones:   this.DISRUPTION_ZONES[keyLine.name] || [],
+            _source: 'prim',
+          });
+        });
+      });
+    });
+
+    // Si PRIM répond mais sans messages structurés, essayer format alternatif
+    if (!alerts.length && data?.Siri) {
+      LOG('PRIM: Réponse OK mais 0 perturbation sur lignes surveillées');
+      return { alerts: [], ts: Date.now(), _source: 'prim_ok' };
+    }
+
+    const seen = new Set();
+    const unique = alerts.filter(a => { if (seen.has(a.line)) return false; seen.add(a.line); return true; });
+    unique.sort((a, b) => (b.isMajor ? 1 : 0) - (a.isMajor ? 1 : 0));
+    LOG('PRIM:', unique.length, 'alertes parsées');
+    return { alerts: unique, ts: Date.now(), _source: 'prim' };
+  },
+
+  // ── Open Data IDFM perturbations (sans clé, CORS OK) ──────────
+  async _fetchOpenDataIDFM() {
+    try {
+      // Dataset perturbations réseau ferré IDF — Open Data officiel, sans clé
+      const url = [
+        'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/',
+        'perturbations-en-temps-reel-sur-le-reseau-ferre/records',
+        '?limit=30&select=ligne,type_perturbation,message,date_debut,date_fin',
+        '&order_by=date_debut+desc',
+      ].join('');
+
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 8000);
+      const resp = await fetch(url, {
+        signal: ctrl.signal,
+        headers: { 'Accept': 'application/json' },
+      });
+      clearTimeout(tid);
+
+      if (!resp.ok) {
+        ERR('Open Data IDFM HTTP:', resp.status);
+        return null;
+      }
+
+      const data = await resp.json();
+      const records = data.results || [];
+      if (!records.length) {
+        LOG('Open Data IDFM: 0 perturbation');
+        return { alerts: [], ts: Date.now(), _source: 'opendata_ok' };
+      }
+
+      return this._parseOpenDataIDFM(records);
+    } catch(e) {
+      ERR('Open Data IDFM:', e.message);
+      return null;
+    }
+  },
+
+  _parseOpenDataIDFM(records) {
+    const alerts = [];
+    records.forEach(r => {
+      const ligneName = (r.ligne || '').toUpperCase();
+      const keyLine = this.KEY_LINES.find(kl =>
+        ligneName.includes(kl.name.toUpperCase()) ||
+        ligneName.includes(kl.name.replace('Ligne ','').replace('RER ',''))
+      );
+      if (!keyLine) return;
+
+      const type    = r.type_perturbation || '';
+      const isMajor = ['ARRET_DE_SERVICE','RETARD_IMPORTANT','SUPPRESSION'].some(t => type.includes(t));
+      const msg     = r.message || type || 'Perturbation signalée';
+
+      alerts.push({
+        line:    keyLine.name,
+        icon:    keyLine.icon,
+        impact:  keyLine.impact,
+        severity: type,
+        isMajor,
+        msg:     msg.slice(0, 150),
+        zones:   this.DISRUPTION_ZONES[keyLine.name] || [],
+        startDt: r.date_debut,
+        endDt:   r.date_fin,
+        _source: 'opendata',
+      });
+    });
+
+    const seen = new Set();
+    const unique = alerts.filter(a => { if (seen.has(a.line)) return false; seen.add(a.line); return true; });
+    unique.sort((a, b) => (b.isMajor ? 1 : 0) - (a.isMajor ? 1 : 0));
+    LOG('Open Data IDFM:', unique.length, 'alertes');
+    return { alerts: unique, ts: Date.now(), _source: 'opendata' };
   },
 
   _buildSyntheticDisruptions() {
@@ -729,16 +865,39 @@ const NAVITIA = {
     const cont = el('navitia-container'); if (!cont) return;
     const alerts = data.alerts || [];
 
+    // Affichage selon la source des données
     if (data._synthetic) {
-      // Affichage synthétique basé sur l'heure (CORS bloqué — aucune clé valide)
       const h = new Date().getHours(), d = new Date().getDay();
       const isRush = (d >= 1 && d <= 5) && ((h >= 7 && h <= 9) || (h >= 17 && h <= 20));
+      // Donner un conseil actionnable même sans données temps réel
+      const rushTip = isRush
+        ? '⚠️ Heure de pointe détectée — Positionnez-vous près des grandes gares'
+        : '✅ Circulation normale estimée sur le réseau TC';
       cont.innerHTML = `
         <div class="list-item ${isRush ? 'warn' : 'ok'}" style="border-radius:10px;font-weight:700;">
-          ${isRush ? '⚠️ Heure de pointe — Surveiller perturbations RER/Métro' : '✅ Réseau transports — Statut nominal (estimation)'}
+          ${rushTip}
+        </div>
+        <div style="background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px;margin-top:8px;">
+          <div style="font-size:11px;font-weight:700;color:var(--gold);margin-bottom:6px;">📡 Activer les alertes temps réel</div>
+          <div style="font-size:10px;color:var(--text-dim);line-height:1.6;">
+            Inscrivez-vous gratuitement sur
+            <strong style="color:var(--text)">prim.iledefrance-mobilites.fr</strong>
+            et collez votre clé dans <code style="background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;">IDFM_KEY</code> dans <code>api.js</code>
+            pour recevoir les pannes RER/Métro en temps réel.
+          </div>
+        </div>`;
+      return;
+    }
+
+    // Source connue mais 0 perturbation = réseau nominal
+    if (!alerts.length && (data._source === 'prim_ok' || data._source === 'opendata_ok')) {
+      cont.innerHTML = `
+        <div class="list-item ok" style="border-radius:10px;font-weight:700;">
+          ✅ Réseau transports en commun — Aucune perturbation
         </div>
         <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">
-          RER A/B/C/D · Métro surveillés · Données temps réel indisponibles depuis navigateur
+          ${data._source === 'prim' || data._source === 'prim_ok' ? '📡 Source : PRIM IDFM temps réel' : '📡 Source : Open Data IDFM'}
+          · ${new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}
         </div>`;
       return;
     }
@@ -784,7 +943,7 @@ const NAVITIA = {
           </div>`).join('')}` : ''}
 
       <div style="font-size:10px;color:var(--text-muted);text-align:right;margin-top:6px;">
-        Source IDFM · ${new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}
+        ${data._source === 'prim' ? '📡 PRIM temps réel' : data._source === 'opendata' ? '📡 Open Data IDFM' : '📡 IDFM'} · ${new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}
       </div>`;
 
     if (majorAlerts.length > 0) {
@@ -893,13 +1052,10 @@ const AVIATION = {
         if (!acs.length) continue;
 
         LOG(`ADSB ${airportCode} ${direction}: ${acs.length} appareils`);
-        // Filter: for ARR, aircraft with altitude < 8000ft approaching; for DEP, aircraft taking off
         const relevant = acs.filter(a => {
           const alt  = typeof a.alt_baro === 'number' ? a.alt_baro : (a.alt_baro === 'ground' ? 0 : 9999);
-          const spd  = a.gs || 0;
-          const onGnd= a.alt_baro === 'ground' || alt < 100;
-          if (direction === 'ARR') return alt < 8000 || onGnd; // approaching or just landed
-          else return onGnd || alt < 5000; // departing or recently taken off
+          if (direction === 'ARR') return alt < 8000 || a.alt_baro === 'ground';
+          else return a.alt_baro === 'ground' || alt < 5000;
         }).slice(0, 10);
         const flights = relevant.length > 0
           ? relevant.map(a => this._normalizeADSB(a, direction, airportCode))
@@ -1399,7 +1555,7 @@ function injectContainers() {
     d.innerHTML = `
       <div style="margin-bottom:10px;">
         <div class="card-row-hd">
-          <span class="card-title">✈️ Vols en temps réel <span style="font-size:9px;color:var(--text-dim);">ADS-B Live</span></span>
+          <span class="card-title">✈️ Vols en temps réel <span style="font-size:9px;color:var(--text-dim);">Open Data ADP</span></span>
           <div style="display:flex;gap:6px;">
             <button class="ef-btn active" onclick="selectAirport('CDG',this)">CDG</button>
             <button class="ef-btn" onclick="selectAirport('ORY',this)">Orly</button>
