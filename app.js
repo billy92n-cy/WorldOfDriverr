@@ -788,87 +788,79 @@ window.loadEvents = async function(forceRefresh) {
     const in21d = new Date(Date.now() + 21 * 86400000).toISOString().split('T')[0];
     let results = null;
 
-    // ── Source 1 : Paris OpenData que-faire-a-paris (CORS OK) ──
-    try {
-      const where    = `date_start >= date'${today}' AND date_start <= date'${in21d}'`;
-      const parisUrl = `https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records`
-        + `?where=${encodeURIComponent(where)}&order_by=date_start&limit=25`
-        + `&select=title,date_start,address_name,address_zipcode,tags,url,price_type`;
-      const ctrl1 = new AbortController();
-      const t1    = setTimeout(() => ctrl1.abort(), 10000);
-      const r1    = await fetch(parisUrl, {
-        signal: ctrl1.signal,
-        headers: { 'Accept': 'application/json' },
-      });
-      clearTimeout(t1);
-      if (r1.ok) {
-        const d1 = await r1.json();
-        if (d1.results?.length >= 1) {
-          results = d1.results;
-          console.log('[Events] Paris OpenData OK:', results.length, 'événements');
-        } else {
-          console.warn('[Events] Paris OpenData: 0 résultats');
-        }
-      } else {
-        console.warn('[Events] Paris OpenData HTTP:', r1.status);
-      }
-    } catch(e1) { console.warn('[Events] Paris OD:', e1.message); }
-
-    // ── Source 2 : Open Data IDF Culturel (dataset corrigé) ──
-    if (!results) {
+    // ── Source 1 : OpenAgenda Ville de Paris via proxy CORS ──────────
+    // openagenda.com/ville-de-paris — agenda officiel, CORS bloqué direct → allorigins
+    const OA_TARGET = `https://openagenda.com/agendas/8753aba4-5dae-4b91-b93c-c18d16c1040e/events.json?limit=20&timings[gte]=${today}`;
+    const OA_PROXIES = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(OA_TARGET)}`,
+      `https://corsproxy.io/?${encodeURIComponent(OA_TARGET)}`,
+    ];
+    for (const url of OA_PROXIES) {
+      if (results) break;
       try {
-        // Dataset correct 2025 : "les-evenements-culturels-de-la-region-ile-de-france"
-        const idfUrls = [
-          `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-culturels-de-la-region-ile-de-france/records?limit=20&order_by=date_debut&select=nom,date_debut,commune,type_evenement`,
-          // Variante ancien nom
-          `https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/les-evenements-du-service-culturel-de-la-region-ile-de-france/records?limit=20&select=nom,date_debut,commune,type_evenement`,
-        ];
-        for (const idfUrl of idfUrls) {
-          const ctrl3 = new AbortController();
-          const t3    = setTimeout(() => ctrl3.abort(), 8000);
-          const r3    = await fetch(idfUrl, { signal: ctrl3.signal, headers: { 'Accept': 'application/json' } });
-          clearTimeout(t3);
-          if (r3.ok) {
-            const d3 = await r3.json();
-            if (d3.results?.length >= 1) {
-              results = d3.results.map(ev => ({
-                title:        ev.nom || 'Événement IDF',
-                date_start:   ev.date_debut?.split('T')[0] || today,
-                address_name: ev.commune || 'Île-de-France',
-                tags:         ev.type_evenement || '',
-              }));
-              console.log('[Events] IDF OK:', results.length);
-              break;
-            }
-          }
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 10000);
+        const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+        clearTimeout(t);
+        if (!r.ok) continue;
+        const text = await r.text();
+        let parsed; try { parsed = JSON.parse(text); } catch(e) { continue; }
+        const raw  = parsed.contents ? JSON.parse(parsed.contents) : parsed;
+        const evts = raw.events || raw.items || [];
+        if (evts.length >= 1) {
+          results = evts.map(ev => ({
+            title:        ev.title?.fr || ev.title || 'Événement Paris',
+            date_start:   ev.firstTiming?.begin?.split('T')[0] || today,
+            address_name: ev.location?.name || ev.location?.address || 'Paris',
+            address_zipcode: '',
+            tags:         ev.keywords?.fr?.join(', ') || '',
+            url:          ev.canonicalUrl || '',
+          }));
+          console.log('[Events] OpenAgenda proxy OK:', results.length);
         }
-      } catch(e3) { console.warn('[Events] IDF:', e3.message); }
+      } catch(e) { console.warn('[Events] OpenAgenda proxy:', e.message); }
     }
 
-    // ── Source 3 : OpenAgenda public sans authentification (agenda Ville de Paris) ──
-    // NOTE: openagenda.com requiert une clé API pour /v2/events — on utilise l'embed public
+    // ── Source 2 : que-faire-a-paris via allorigins ──────────────
+    if (!results) {
+      const QF_TARGET = `https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records?where=${encodeURIComponent("date_start >= date'" + today + "'")}&order_by=date_start&limit=20&select=title,date_start,address_name,address_zipcode,tags,url`;
+      const QF_PROXIES = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(QF_TARGET)}`,
+        `https://corsproxy.io/?${encodeURIComponent(QF_TARGET)}`,
+      ];
+      for (const url of QF_PROXIES) {
+        if (results) break;
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 10000);
+          const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+          clearTimeout(t);
+          if (!r.ok) continue;
+          const text = await r.text();
+          let parsed; try { parsed = JSON.parse(text); } catch(e) { continue; }
+          const raw = parsed.contents ? JSON.parse(parsed.contents) : parsed;
+          if (raw.results?.length >= 1) {
+            results = raw.results;
+            console.log('[Events] QFP proxy OK:', results.length);
+          }
+        } catch(e) { console.warn('[Events] QFP proxy:', e.message); }
+      }
+    }
+
+    // ── Source 3 : Gemini — événements probables selon date/heure ─
     if (!results) {
       try {
-        // Format public RSS d'OpenAgenda (pas besoin de clé)
-        const oaUrl = `https://openagenda.com/ville-de-paris/events.json?limit=20&oaq%5Bpassed%5D=0`;
-        const ctrl4 = new AbortController();
-        const t4    = setTimeout(() => ctrl4.abort(), 8000);
-        const r4    = await fetch(oaUrl, { signal: ctrl4.signal });
-        clearTimeout(t4);
-        if (r4.ok) {
-          const d4 = await r4.json();
-          const evts = d4.events || d4.items || [];
-          if (evts.length >= 1) {
-            results = evts.map(ev => ({
-              title:        ev.title?.fr || ev.title || 'Événement Paris',
-              date_start:   ev.firstTiming?.begin?.split('T')[0] || today,
-              address_name: ev.location?.name || 'Paris',
-              tags:         '',
-            }));
-            console.log('[Events] OpenAgenda JSON OK:', results.length);
-          }
+        const h    = new Date().getHours();
+        const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
+        const prompt = 'Tu es un expert VTC parisien. Nous sommes ' + jour + ' a ' + h + 'h, date : ' + today + '. Liste 5 evenements ou flux voyageurs PROBABLES a Paris cette semaine creant de la demande VTC (concerts, matchs, expos, salons, manifestations...). Reponds UNIQUEMENT en JSON : [{"title":"...","date_start":"YYYY-MM-DD","address_name":"lieu exact Paris","tags":"type","impact":"fort|modere|faible"}]';
+        const text = await callGemini(prompt, { maxTokens: 500, temperature: 0.4 });
+        const clean = text.replace(/```json|```/g, '').trim();
+        const evts = JSON.parse(clean);
+        if (evts?.length >= 1) {
+          results = evts;
+          console.log('[Events] Gemini OK:', results.length);
         }
-      } catch(e4) { console.warn('[Events] OpenAgenda:', e4.message); }
+      } catch(eg) { console.warn('[Events] Gemini:', eg.message); }
     }
 
     if (!results) throw new Error('Toutes les sources événements indisponibles');
@@ -1407,8 +1399,25 @@ window.uploadDocs = function(input) {
 };
 
 function saveDocs() {
-  const light = state.docs.map(d => ({ name:d.name, id:d.id, type:d.type, src:d.src.length<600000?d.src:'' }));
-  try { setLS('wob_docs', JSON.stringify(light)); } catch(e) {}
+  // Tenter de tout sauvegarder — si quota LocalStorage dépassé, réduire progressivement
+  const full = state.docs.map(d => ({ name: d.name, id: d.id, type: d.type, src: d.src || '' }));
+  try {
+    setLS('wob_docs', JSON.stringify(full));
+    return;
+  } catch(e) {}
+
+  // Quota dépassé : retirer les gros docs un par un jusqu'à ce que ça passe
+  let trimmed = full.map(d => ({
+    ...d,
+    src: d.src.length > 300000 ? d.src.slice(0, 300000) : d.src,
+  }));
+  try { setLS('wob_docs', JSON.stringify(trimmed)); return; } catch(e) {}
+
+  // Dernier recours : on garde seulement les métadonnées (nom, id, type) sans les images
+  const meta = full.map(d => ({ name: d.name, id: d.id, type: d.type, src: '' }));
+  try { setLS('wob_docs', JSON.stringify(meta)); } catch(e) {
+    console.warn('[WOD] localStorage plein — documents non sauvegardés');
+  }
 }
 
 function renderCtrlDocs() {
@@ -1444,16 +1453,50 @@ function renderViewerSlides() {
   const counter = $('iv-counter');
   if (!track) return;
 
+  // Libérer les anciennes blob URLs pour éviter les fuites mémoire
+  if (window._wodPdfBlobUrls) {
+    window._wodPdfBlobUrls.forEach(u => URL.revokeObjectURL(u));
+  }
+  window._wodPdfBlobUrls = [];
+
   track.innerHTML = state.docs.map(doc => {
     const isImg = doc.type?.startsWith('image/');
-    const content = isImg && doc.src
-      ? `<img src="${doc.src}" alt="${doc.name}">`
-      : `<div style="color:#fff;text-align:center;display:flex;flex-direction:column;align-items:center;gap:16px;padding:40px">
-          <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <span style="font-size:.9rem;opacity:.8">${doc.name}</span>
-          <span style="font-size:.75rem;opacity:.5">Prévisualisation PDF non disponible</span>
+    const isPdf = doc.type === 'application/pdf';
+
+    if (isImg && doc.src) {
+      return `<div class="iv-slide"><img src="${doc.src}" alt="${doc.name}" style="max-width:100%;max-height:80vh;object-fit:contain;border-radius:8px;"></div>`;
+    }
+
+    if (isPdf && doc.src) {
+      // Convertir base64 → Blob → URL pour l'embed PDF
+      try {
+        const base64 = doc.src.split(',')[1] || doc.src;
+        const binary = atob(base64);
+        const bytes  = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob   = new Blob([bytes], { type: 'application/pdf' });
+        const blobUrl = URL.createObjectURL(blob);
+        window._wodPdfBlobUrls.push(blobUrl); // Pour libérer plus tard
+        return `<div class="iv-slide" style="width:100%;height:80vh;">
+          <embed src="${blobUrl}" type="application/pdf" width="100%" height="100%" style="border-radius:8px;">
+          <div style="text-align:center;margin-top:8px;">
+            <a href="${blobUrl}" target="_blank" style="color:var(--gold);font-size:.75rem;text-decoration:none;">
+              📄 Ouvrir dans un nouvel onglet
+            </a>
+          </div>
         </div>`;
-    return `<div class="iv-slide">${content}</div>`;
+      } catch(e) {
+        return `<div class="iv-slide" style="color:#fff;text-align:center;padding:40px;">
+          <span style="font-size:.8rem;opacity:.7">⚠️ PDF trop volumineux pour prévisualisation<br>${doc.name}</span>
+        </div>`;
+      }
+    }
+
+    // Autre type — juste le nom
+    return `<div class="iv-slide" style="color:#fff;text-align:center;display:flex;flex-direction:column;align-items:center;gap:16px;padding:40px;">
+      <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <span style="font-size:.9rem;opacity:.8">${doc.name}</span>
+    </div>`;
   }).join('');
 
   dots.innerHTML = state.docs.map((_,i) => `<div class="iv-dot ${i===state.viewerIdx?'active':''}" onclick="goToSlide(${i})"></div>`).join('');

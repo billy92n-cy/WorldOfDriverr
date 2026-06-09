@@ -25,7 +25,7 @@ const WOB_CONFIG = {
 
   // IDFM PRIM — https://prim.iledefrance-mobilites.fr
   // ▶ Collez ici votre clé IDF Mobilités (obtenue sur prim.iledefrance-mobilites.fr)
-  IDFM_KEY: 'b63BuUhQ3ed5CuBrOxwpk8bmOddvTH0v',
+  IDFM_KEY: 'odFJa9ooMgc5hHcNLGBAIfhMheIQZqUi',
 
   // Navitia legacy (clé expirée — remplacée par PRIM ci-dessus)
   NAVITIA_KEY: 'tmvRLg8J6MvXpjTFKOuqxwlIJ7oMtFtt',
@@ -649,36 +649,37 @@ const NAVITIA = {
   // ── PRIM IDFM /general-message ──────────────────────────────────
   // API officielle IDF Mobilités — CORS * depuis navigateur — Temps réel
   async _fetchPRIM() {
-    try {
-      // general-message retourne toutes les perturbations réseau IDF
-      const url = 'https://prim.iledefrance-mobilites.fr/marketplace/general-message';
-      const ctrl = new AbortController();
-      const tid  = setTimeout(() => ctrl.abort(), 10000);
-      const resp = await fetch(url, {
-        signal: ctrl.signal,
-        headers: {
-          'apikey': WOB_CONFIG.IDFM_KEY,
-          'Accept': 'application/json',
-        },
-      });
-      clearTimeout(tid);
+    // PRIM bloque aussi CORS depuis GitHub Pages → proxy avec apikey dans l'URL
+    const BASE = 'https://prim.iledefrance-mobilites.fr/marketplace/general-message';
+    const urlWithKey = `${BASE}?apikey=${WOB_CONFIG.IDFM_KEY}`;
 
-      if (!resp.ok) {
-        ERR('PRIM HTTP:', resp.status, resp.statusText);
-        // 401 = clé invalide, 403 = droits insuffisants
-        if (resp.status === 401 || resp.status === 403) {
-          ERR('PRIM: Clé IDFM_KEY invalide ou expirée → https://prim.iledefrance-mobilites.fr');
+    // Essai direct d'abord (fonctionnerait si CORS * est activé côté PRIM)
+    const URLS = [
+      { url: BASE, headers: { 'apikey': WOB_CONFIG.IDFM_KEY, 'Accept': 'application/json' } },
+      { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(urlWithKey)}`, headers: { 'Accept': 'application/json' } },
+      { url: `https://corsproxy.io/?${encodeURIComponent(urlWithKey)}`, headers: { 'Accept': 'application/json' } },
+    ];
+
+    for (const { url, headers } of URLS) {
+      try {
+        const ctrl = new AbortController();
+        const tid  = setTimeout(() => ctrl.abort(), 10000);
+        const resp = await fetch(url, { signal: ctrl.signal, headers });
+        clearTimeout(tid);
+        if (!resp.ok) {
+          ERR('PRIM HTTP:', resp.status, resp.statusText);
+          // Ne pas couper les proxies sur 401/403 direct — le CORS peut simuler ces codes
+          // On laisse les proxies tenter leur chance (la clé sera dans l'URL pour eux)
+          continue;
         }
-        return null;
-      }
-
-      const data = await resp.json();
-      LOG('PRIM OK — parsing réponse...');
-      return this._parsePRIM(data);
-    } catch(e) {
-      ERR('PRIM fetch:', e.message);
-      return null;
+        const text = await resp.text();
+        let data; try { data = JSON.parse(text); } catch(e) { continue; }
+        const raw = data.contents ? JSON.parse(data.contents) : data;
+        LOG('PRIM OK — parsing réponse...');
+        return this._parsePRIM(raw);
+      } catch(e) { ERR('PRIM fetch:', e.message); }
     }
+    return null;
   },
 
   // Parser le format SIRI/JSON de PRIM general-message
@@ -738,40 +739,37 @@ const NAVITIA = {
 
   // ── Open Data IDFM perturbations (sans clé, CORS OK) ──────────
   async _fetchOpenDataIDFM() {
-    try {
-      // Dataset perturbations réseau ferré IDF — Open Data officiel, sans clé
-      const url = [
-        'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/',
-        'perturbations-en-temps-reel-sur-le-reseau-ferre/records',
-        '?limit=30&select=ligne,type_perturbation,message,date_debut,date_fin',
-        '&order_by=date_debut+desc',
-      ].join('');
+    // data.iledefrance-mobilites.fr bloque CORS depuis GitHub Pages → proxy
+    const TARGET = [
+      'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/',
+      'perturbations-en-temps-reel-sur-le-reseau-ferre/records',
+      '?limit=30&select=ligne,type_perturbation,message,date_debut,date_fin&order_by=date_debut+desc',
+    ].join('');
 
-      const ctrl = new AbortController();
-      const tid  = setTimeout(() => ctrl.abort(), 8000);
-      const resp = await fetch(url, {
-        signal: ctrl.signal,
-        headers: { 'Accept': 'application/json' },
-      });
-      clearTimeout(tid);
+    const PROXIES = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(TARGET)}`,
+      `https://corsproxy.io/?${encodeURIComponent(TARGET)}`,
+    ];
 
-      if (!resp.ok) {
-        ERR('Open Data IDFM HTTP:', resp.status);
-        return null;
-      }
-
-      const data = await resp.json();
-      const records = data.results || [];
-      if (!records.length) {
-        LOG('Open Data IDFM: 0 perturbation');
-        return { alerts: [], ts: Date.now(), _source: 'opendata_ok' };
-      }
-
-      return this._parseOpenDataIDFM(records);
-    } catch(e) {
-      ERR('Open Data IDFM:', e.message);
-      return null;
+    for (const url of PROXIES) {
+      try {
+        const ctrl = new AbortController();
+        const tid  = setTimeout(() => ctrl.abort(), 10000);
+        const resp = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+        clearTimeout(tid);
+        if (!resp.ok) { ERR('Open Data IDFM proxy HTTP:', resp.status); continue; }
+        const text = await resp.text();
+        let parsed; try { parsed = JSON.parse(text); } catch(e) { continue; }
+        const raw = parsed.contents ? JSON.parse(parsed.contents) : parsed;
+        const records = raw.results || [];
+        if (!records.length) {
+          LOG('Open Data IDFM: 0 perturbation');
+          return { alerts: [], ts: Date.now(), _source: 'opendata_ok' };
+        }
+        return this._parseOpenDataIDFM(records);
+      } catch(e) { ERR('Open Data IDFM:', e.message); }
     }
+    return null;
   },
 
   _parseOpenDataIDFM(records) {
@@ -1029,13 +1027,20 @@ const AVIATION = {
     const pos   = AIRPORT_POS[airportCode] || AIRPORT_POS.CDG;
     const isArr = direction === 'ARR';
 
-    // ADS-B Exchange — endpoint public, CORS *, pas d'auth requise
+    // ADS-B — sources avec proxies CORS en cascade
+    const ADSB_TARGET   = `https://api.adsb.lol/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15`;
+    const OPENSKY_TARGET = `https://opensky-network.org/api/states/all?lamin=${pos.lat-0.2}&lomin=${pos.lon-0.2}&lamax=${pos.lat+0.2}&lomax=${pos.lon+0.2}`;
     const URLS = [
-      `https://api.adsb.lol/v2/lat/${pos.lat}/lon/${pos.lon}/dist/15`,
-      `https://opensky-network.org/api/states/all?lamin=${pos.lat-0.2}&lomin=${pos.lon-0.2}&lamax=${pos.lat+0.2}&lomax=${pos.lon+0.2}`,
+      // Direct d'abord (adsb.lol autorise CORS * normalement)
+      { url: ADSB_TARGET,   isProxy: false },
+      // Proxy si direct bloqué
+      { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(ADSB_TARGET)}`, isProxy: true },
+      { url: `https://corsproxy.io/?${encodeURIComponent(ADSB_TARGET)}`,             isProxy: true },
+      // OpenSky en dernier recours
+      { url: OPENSKY_TARGET, isProxy: false },
     ];
 
-    for (const url of URLS) {
+    for (const { url, isProxy } of URLS) {
       try {
         const ctrl = new AbortController();
         const tid  = setTimeout(() => ctrl.abort(), 9000);
@@ -1045,7 +1050,10 @@ const AVIATION = {
         });
         clearTimeout(tid);
         if (!resp.ok) { ERR('ADSB HTTP', resp.status); continue; }
-        const json = await resp.json();
+        const text = await resp.text();
+        let raw; try { raw = JSON.parse(text); } catch(e) { continue; }
+        // Déwrapper le proxy allorigins si besoin
+        const json = (isProxy && raw.contents) ? JSON.parse(raw.contents) : raw;
         // Normaliser les 2 formats : ADS-B lol (json.ac) et OpenSky (json.states)
         let acs = json.ac || json.aircraft || [];
         if (!acs.length && json.states) {
