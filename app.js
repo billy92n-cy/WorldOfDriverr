@@ -781,86 +781,50 @@ window.loadEvents = async function(forceRefresh) {
     return;
   }
 
-  el.innerHTML = `<div class="list-item info">Chargement des événements...</div>`;
+  el.innerHTML = `<div class="list-item info">🤖 Analyse des événements en cours...</div>`;
 
   try {
     const today = new Date().toISOString().split('T')[0];
-    const in21d = new Date(Date.now() + 21 * 86400000).toISOString().split('T')[0];
     let results = null;
 
-    // ── Source 1 : OpenAgenda Ville de Paris via proxy CORS ──────────
-    // openagenda.com/ville-de-paris — agenda officiel, CORS bloqué direct → allorigins
-    const OA_TARGET = `https://openagenda.com/agendas/8753aba4-5dae-4b91-b93c-c18d16c1040e/events.json?limit=20&timings[gte]=${today}`;
-    const OA_PROXIES = [
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(OA_TARGET)}`,
-      `https://corsproxy.io/?${encodeURIComponent(OA_TARGET)}`,
-    ];
-    for (const url of OA_PROXIES) {
-      if (results) break;
-      try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 10000);
-        const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
-        clearTimeout(t);
-        if (!r.ok) continue;
-        const text = await r.text();
-        let parsed; try { parsed = JSON.parse(text); } catch(e) { continue; }
-        const raw  = parsed.contents ? JSON.parse(parsed.contents) : parsed;
-        const evts = raw.events || raw.items || [];
-        if (evts.length >= 1) {
-          results = evts.map(ev => ({
-            title:        ev.title?.fr || ev.title || 'Événement Paris',
-            date_start:   ev.firstTiming?.begin?.split('T')[0] || today,
-            address_name: ev.location?.name || ev.location?.address || 'Paris',
-            address_zipcode: '',
-            tags:         ev.keywords?.fr?.join(', ') || '',
-            url:          ev.canonicalUrl || '',
-          }));
-          console.log('[Events] OpenAgenda proxy OK:', results.length);
-        }
-      } catch(e) { console.warn('[Events] OpenAgenda proxy:', e.message); }
-    }
+    // ── SOURCE 1 : Gemini (principal) — direct, CORS natif, pas de proxy ──
+    // Gemini connaît les grands événements parisiens et génère une liste fiable
+    // On l'utilise EN PREMIER car les proxies publics sont instables
+    try {
+      const h    = new Date().getHours();
+      const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
+      const prompt = 'Tu es un expert VTC parisien. Nous sommes ' + jour + ' ' + today + ' a ' + h + 'h. Liste 6 evenements REELS ou tres probables a Paris dans les 7 prochains jours creant de la demande VTC (concerts Bercy/AccorArenas, matchs PSG, salons Porte de Versailles, expos, manifestations, festivals...). Sois precis sur les lieux et dates. Reponds UNIQUEMENT en JSON valide, rien d autre : [{"title":"...","date_start":"YYYY-MM-DD","address_name":"lieu exact Paris","address_zipcode":"75XXX","tags":"type evenement","impact":"fort|modere|faible"}]';
+      const text = await callGemini(prompt, { maxTokens: 600, temperature: 0.3 });
+      const clean = text.replace(/```json|```/g, '').trim();
+      const evts = JSON.parse(clean);
+      if (evts?.length >= 1) {
+        results = evts;
+        console.log('[Events] Gemini principal OK:', results.length);
+      }
+    } catch(eg) { console.warn('[Events] Gemini principal:', eg.message); }
 
-    // ── Source 2 : que-faire-a-paris via allorigins ──────────────
+    // ── SOURCE 2 : que-faire-a-paris via proxy (fallback si Gemini KO) ──
     if (!results) {
-      const QF_TARGET = `https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records?where=${encodeURIComponent("date_start >= date'" + today + "'")}&order_by=date_start&limit=20&select=title,date_start,address_name,address_zipcode,tags,url`;
-      const QF_PROXIES = [
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(QF_TARGET)}`,
-        `https://corsproxy.io/?${encodeURIComponent(QF_TARGET)}`,
-      ];
-      for (const url of QF_PROXIES) {
+      const QF_TARGET = 'https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records'
+        + '?where=' + encodeURIComponent("date_start >= date'" + today + "'")
+        + '&order_by=date_start&limit=20&select=title,date_start,address_name,address_zipcode,tags,url';
+      for (const proxy of [
+        'https://api.allorigins.win/raw?url=' + encodeURIComponent(QF_TARGET),
+        'https://corsproxy.io/?' + encodeURIComponent(QF_TARGET),
+      ]) {
         if (results) break;
         try {
           const ctrl = new AbortController();
-          const t = setTimeout(() => ctrl.abort(), 10000);
-          const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+          const t = setTimeout(() => ctrl.abort(), 8000);
+          const r = await fetch(proxy, { signal: ctrl.signal });
           clearTimeout(t);
           if (!r.ok) continue;
           const text = await r.text();
           let parsed; try { parsed = JSON.parse(text); } catch(e) { continue; }
           const raw = parsed.contents ? JSON.parse(parsed.contents) : parsed;
-          if (raw.results?.length >= 1) {
-            results = raw.results;
-            console.log('[Events] QFP proxy OK:', results.length);
-          }
+          if (raw.results?.length >= 1) { results = raw.results; console.log('[Events] QFP proxy OK:', results.length); }
         } catch(e) { console.warn('[Events] QFP proxy:', e.message); }
       }
-    }
-
-    // ── Source 3 : Gemini — événements probables selon date/heure ─
-    if (!results) {
-      try {
-        const h    = new Date().getHours();
-        const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
-        const prompt = 'Tu es un expert VTC parisien. Nous sommes ' + jour + ' a ' + h + 'h, date : ' + today + '. Liste 5 evenements ou flux voyageurs PROBABLES a Paris cette semaine creant de la demande VTC (concerts, matchs, expos, salons, manifestations...). Reponds UNIQUEMENT en JSON : [{"title":"...","date_start":"YYYY-MM-DD","address_name":"lieu exact Paris","tags":"type","impact":"fort|modere|faible"}]';
-        const text = await callGemini(prompt, { maxTokens: 500, temperature: 0.4 });
-        const clean = text.replace(/```json|```/g, '').trim();
-        const evts = JSON.parse(clean);
-        if (evts?.length >= 1) {
-          results = evts;
-          console.log('[Events] Gemini OK:', results.length);
-        }
-      } catch(eg) { console.warn('[Events] Gemini:', eg.message); }
     }
 
     if (!results) throw new Error('Toutes les sources événements indisponibles');

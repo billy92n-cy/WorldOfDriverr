@@ -649,35 +649,35 @@ const NAVITIA = {
   // ── PRIM IDFM /general-message ──────────────────────────────────
   // API officielle IDF Mobilités — CORS * depuis navigateur — Temps réel
   async _fetchPRIM() {
-    // PRIM bloque aussi CORS depuis GitHub Pages → proxy avec apikey dans l'URL
-    const BASE = 'https://prim.iledefrance-mobilites.fr/marketplace/general-message';
-    const urlWithKey = `${BASE}?apikey=${WOB_CONFIG.IDFM_KEY}`;
+    // PRIM IDF Mobilités — la clé doit être dans l'URL (query param) pour passer via proxy
+    // Les proxies publics ne transmettent pas les headers custom → on met apikey dans l'URL
+    const BASE   = 'https://prim.iledefrance-mobilites.fr/marketplace/general-message';
+    const KEY    = WOB_CONFIG.IDFM_KEY;
+    const DIRECT = BASE; // Essai direct sans proxy (parfois CORS * activé sur PRIM)
+    const WITH_KEY_IN_URL = BASE + '?apikey=' + KEY;
 
-    // Essai direct d'abord (fonctionnerait si CORS * est activé côté PRIM)
-    const URLS = [
-      { url: BASE, headers: { 'apikey': WOB_CONFIG.IDFM_KEY, 'Accept': 'application/json' } },
-      { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(urlWithKey)}`, headers: { 'Accept': 'application/json' } },
-      { url: `https://corsproxy.io/?${encodeURIComponent(urlWithKey)}`, headers: { 'Accept': 'application/json' } },
+    const ATTEMPTS = [
+      // 1. Direct avec header (fonctionnel si CORS * activé côté PRIM)
+      { url: DIRECT,          opts: { headers: { 'apikey': KEY, 'Accept': 'application/json' } } },
+      // 2. allorigins avec clé dans l'URL (pas de header custom possible via proxy)
+      { url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(WITH_KEY_IN_URL), opts: { headers: { 'Accept': 'application/json' } } },
+      // 3. corsproxy.io avec clé dans l'URL
+      { url: 'https://corsproxy.io/?' + encodeURIComponent(WITH_KEY_IN_URL), opts: { headers: { 'Accept': 'application/json' } } },
     ];
 
-    for (const { url, headers } of URLS) {
+    for (const { url, opts } of ATTEMPTS) {
       try {
         const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 10000);
-        const resp = await fetch(url, { signal: ctrl.signal, headers });
+        const tid  = setTimeout(() => ctrl.abort(), 12000);
+        const resp = await fetch(url, { signal: ctrl.signal, ...opts });
         clearTimeout(tid);
-        if (!resp.ok) {
-          ERR('PRIM HTTP:', resp.status, resp.statusText);
-          // Ne pas couper les proxies sur 401/403 direct — le CORS peut simuler ces codes
-          // On laisse les proxies tenter leur chance (la clé sera dans l'URL pour eux)
-          continue;
-        }
+        if (!resp.ok) { ERR('PRIM HTTP:', resp.status); continue; }
         const text = await resp.text();
         let data; try { data = JSON.parse(text); } catch(e) { continue; }
-        const raw = data.contents ? JSON.parse(data.contents) : data;
-        LOG('PRIM OK — parsing réponse...');
+        const raw = (data.contents) ? JSON.parse(data.contents) : data;
+        LOG('PRIM OK via:', url.slice(0, 50));
         return this._parsePRIM(raw);
-      } catch(e) { ERR('PRIM fetch:', e.message); }
+      } catch(e) { ERR('PRIM tentative:', e.message); }
     }
     return null;
   },
