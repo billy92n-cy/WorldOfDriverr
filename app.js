@@ -2152,6 +2152,28 @@ const HOME = {
       return;
     }
 
+    // ── Protection quotas Gemini ──────────────────────────────────────
+    // TTL : 30 min entre deux appels réels (évite spam bouton + appels auto)
+    const IA_TTL_MS  = 30 * 60 * 1000; // 30 minutes
+    const lastCall   = parseInt(ls('wob_ia_last_call') || '0', 10);
+    const cachedText = ls('wob_ia');
+    const now        = Date.now();
+    const tripsSig   = trips.length; // Si nouvelles courses depuis dernier appel → on force le refresh
+
+    // On réutilise le cache SI : < 30min ET même nombre de courses
+    const lastTripsCount = parseInt(ls('wob_ia_last_trips') || '0', 10);
+    if (cachedText && (now - lastCall) < IA_TTL_MS && lastTripsCount === tripsSig) {
+      iaEl.textContent = cachedText;
+      return; // Cache valide, pas d'appel API
+    }
+
+    // Rate-limit : max 1 appel / 10 secondes (anti-double clic)
+    if ((now - lastCall) < 10_000) {
+      if (cachedText) iaEl.textContent = cachedText;
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────
+
     dotEl?.classList.add('active');
     iaEl.textContent = '⏳ Analyse de vos courses en cours...';
 
@@ -2267,21 +2289,27 @@ En te basant UNIQUEMENT sur ces données réelles, donne :
 
 Sois direct, chiffré, sans blabla. Parle comme un expert VTC, pas comme un chatbot générique. Max 6 phrases.`;
 
+    // ── Gemini Flash 2.0 — moteur IA principal (gratuit, CORS OK) ────
+    const GEMINI_KEY = 'AIzaSyAb8RN6Jxrrq7Te8iyhnqNqnHw3ZEey-six8X1Ivxa9KsXKbqvA';
+    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+
     try {
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      const resp = await fetch(GEMINI_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 600,
-          messages: [{ role: 'user', content: prompt }]
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 600, temperature: 0.4 }
         })
       });
-      if (!resp.ok) throw new Error(`API ${resp.status}`);
+      if (!resp.ok) throw new Error(`Gemini API ${resp.status}`);
       const data = await resp.json();
-      const text = data.content?.map(c => c.text || '').join('') || '';
+      const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+      if (!text) throw new Error('Réponse Gemini vide');
       iaEl.textContent = text;
       setLS('wob_ia', text);
+      setLS('wob_ia_last_call', String(Date.now()));
+      setLS('wob_ia_last_trips', String(trips.length));
     } catch {
       // Fallback local — analyse VTC sans API
       const lines = [];
@@ -2304,6 +2332,8 @@ Sois direct, chiffré, sans blabla. Parle comme un expert VTC, pas comme un chat
       lines.push(`⛽ Carburant : ${fuelCost.toFixed(2)}€ sur ${totalKm.toFixed(0)} km — ratio net ${ratioKm > 0 ? (net / totalKm).toFixed(2) : '—'}€/km réel. ${ratioKm < 1.8 ? 'Réduisez les km à vide en restant dans les zones demande forte.' : 'Bonne maîtrise du kilométrage.'}`);
       iaEl.textContent = lines.join(' ');
       setLS('wob_ia', iaEl.textContent);
+      setLS('wob_ia_last_call', String(Date.now()));
+      setLS('wob_ia_last_trips', String(trips.length));
     } finally {
       dotEl?.classList.remove('active');
       // Projections
