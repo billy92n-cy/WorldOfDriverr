@@ -1,3 +1,31 @@
+// ══════════════════════════════════════════════════
+//  GEMINI — Moteur IA unique de l'application
+// ══════════════════════════════════════════════════
+const GEMINI_KEY = 'AIzaSyAb8RN6Jxrrq7Te8iyhnqNqnHw3ZEey-six8X1Ivxa9KsXKbqvA';
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+
+/**
+ * Appel Gemini Flash 2.0 — helper central
+ * @param {string} prompt
+ * @param {object} opts — { maxTokens=600, temperature=0.4 }
+ * @returns {Promise<string>} texte généré
+ */
+async function callGemini(prompt, { maxTokens = 600, temperature = 0.4 } = {}) {
+  const resp = await fetch(GEMINI_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: maxTokens, temperature },
+    }),
+  });
+  if (!resp.ok) throw new Error(`Gemini ${resp.status}`);
+  const data = await resp.json();
+  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+  if (!text) throw new Error('Réponse Gemini vide');
+  return text;
+}
+
 "use strict";
 
 // ══════════════════════════════════════════════════
@@ -645,17 +673,41 @@ window.loadTraffic = async function() {
   setText('rush-sub', rush.sub);
 
   const h = new Date().getHours();
-  const conseils = [];
-  if (h>=6&&h<=9)   conseils.push('Gare du Nord · Gare de Lyon — Clients pro le matin');
-  if (h>=11&&h<=14) conseils.push('Zone Opéra / Châtelet — Déjeuners affaires');
-  if (h>=17&&h<=20) conseils.push('La Défense + gares — plus de courses');
-  if (h>=20&&h<=23) conseils.push('Sorties spectacles — Grands Boulevards, Bastille');
-  if (h>=22)        conseils.push('CDG la nuit = course garantie longue distance');
-  conseils.push('Orly : moins de concurrence que CDG');
-  conseils.push('Vérifiez l\'onglet Événements pour planifier');
-
+  const dayNames = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
+  const jour = dayNames[new Date().getDay()];
   const consEl = $('rush-conseils');
-  if (consEl) consEl.innerHTML = conseils.map(c => `<div class="list-item gold">${c}</div>`).join('');
+
+  // Conseils statiques immédiats (affichage instantané)
+  const conseilsStatiques = [];
+  if (h>=6&&h<=9)   conseilsStatiques.push('Gare du Nord · Gare de Lyon — Clients pro le matin');
+  if (h>=11&&h<=14) conseilsStatiques.push('Zone Opéra / Châtelet — Déjeuners affaires');
+  if (h>=17&&h<=20) conseilsStatiques.push('La Défense + gares — plus de courses');
+  if (h>=20&&h<=23) conseilsStatiques.push('Sorties spectacles — Grands Boulevards, Bastille');
+  if (h>=22)        conseilsStatiques.push('CDG la nuit = course garantie longue distance');
+  conseilsStatiques.push('Orly : moins de concurrence que CDG');
+  if (consEl) consEl.innerHTML = conseilsStatiques.map(c => `<div class="list-item gold">${c}</div>`).join('');
+
+  // Conseils Gemini dynamiques (en arrière-plan, TTL 20 min)
+  const conseilCacheKey = 'wob_conseils_ia';
+  const conseilCacheTs  = 'wob_conseils_ia_ts';
+  const conseilAge = Date.now() - parseInt(ls(conseilCacheTs) || '0', 10);
+  if (conseilAge < 20 * 60 * 1000) {
+    const cached = ls(conseilCacheKey);
+    if (cached && consEl) { consEl.innerHTML = cached; }
+  } else {
+    const promptConseils = `Tu es un expert VTC parisien. Il est ${h}h, ${jour}. Donne 4 conseils TRÈS COURTS (max 10 mots chacun) et CONCRETS pour maximiser les courses VTC à Paris maintenant : zones à cibler, créneaux, types de clients probables. Format : liste de 4 bullet points avec emoji. Rien d'autre.`;
+    callGemini(promptConseils, { maxTokens: 200, temperature: 0.6 })
+      .then(text => {
+        if (!text || !consEl) return;
+        // Parser les bullet points retournés par Gemini
+        const lines = text.split('\n').map(l => l.replace(/^[-•*]\s*/, '').trim()).filter(l => l.length > 3);
+        const html = lines.map(l => `<div class="list-item gold">${l}</div>`).join('');
+        consEl.innerHTML = html;
+        setLS(conseilCacheKey, html);
+        setLS(conseilCacheTs, String(Date.now()));
+      })
+      .catch(() => {}); // Silencieux — les conseils statiques restent affichés
+  }
 
   const zonesEl = $('traffic-zones');
   if (!zonesEl) return;
@@ -879,31 +931,51 @@ function renderEvents(events) {
 }
 
 function renderEventsFallback(el) {
-  // Affichage de secours quand l'API Paris est indisponible
-  const now = new Date();
-  const fmt = d => d.toLocaleDateString('fr-FR',{weekday:'short',day:'numeric',month:'short'});
-  const d1 = fmt(new Date(now.getTime()+86400000));
-  const d2 = fmt(new Date(now.getTime()+2*86400000));
-  const d3 = fmt(new Date(now.getTime()+5*86400000));
-  el.innerHTML = `
-    <div class="list-item warn" style="font-size:11px;border-radius:8px;margin-bottom:8px;">
-      ⚠️ API Paris temporairement indisponible · Appuyez sur 🔄 pour réessayer
-    </div>
-    <div class="list-item danger" data-impact="3" style="flex-direction:column;gap:2px;">
-      <span style="font-weight:700;font-size:.8rem;">🏟️ Concerts & Événements Bercy / AccorArenas</span>
-      <span style="font-size:.7rem;opacity:.85">${d1}</span>
-      <span style="font-size:.68rem;font-weight:700;color:#ff4d6a;">Très fort impact VTC — Se positionner tôt</span>
-    </div>
-    <div class="list-item warn" data-impact="2" style="flex-direction:column;gap:2px;">
-      <span style="font-weight:700;font-size:.8rem;">🎭 Spectacles — Grands Boulevards & Opéra</span>
-      <span style="font-size:.7rem;opacity:.85">${d2}</span>
-      <span style="font-size:.68rem;font-weight:700;">Fort impact · Zones Opéra / République</span>
-    </div>
-    <div class="list-item info" data-impact="1" style="flex-direction:column;gap:2px;">
-      <span style="font-weight:700;font-size:.8rem;">🏃 Marché & Expositions — Paris centre</span>
-      <span style="font-size:.7rem;opacity:.85">${d3}</span>
-      <span style="font-size:.68rem;font-weight:700;">Impact modéré</span>
-    </div>`;
+  const now  = new Date();
+  const h    = now.getHours();
+  const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][now.getDay()];
+  const date = now.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' });
+
+  el.innerHTML = '<div class="list-item info" style="font-size:11px;">🤖 Analyse des événements probables...</div>';
+
+  const cacheKey = 'wob_events_fallback';
+  const cacheTs  = 'wob_events_fallback_ts';
+  const age = Date.now() - parseInt(ls(cacheTs) || '0', 10);
+  if (age < 60 * 60 * 1000) {
+    const cached = ls(cacheKey);
+    if (cached) { el.innerHTML = cached; return; }
+  }
+
+  const prompt = `Tu es un expert VTC parisien. Nous sommes ${jour} ${date} a ${h}h. Liste 3 evenements ou flux de voyageurs PROBABLES aujourd hui a Paris qui creent de la demande VTC. Pour chaque evenement donne : titre court, zone Paris concernee, niveau d impact (fort/modere/faible), conseil de positionnement en 5 mots max. Reponds en JSON strict : [{"titre":"...","zone":"...","impact":"fort|modere|faible","conseil":"..."}] Rien d autre que le JSON.`;
+
+  callGemini(prompt, { maxTokens: 400, temperature: 0.5 })
+    .then(text => {
+      let events;
+      try {
+        const clean = text.replace(/```json|```/g, '').trim();
+        events = JSON.parse(clean);
+      } catch(e) { events = null; }
+
+      if (!events || !events.length) {
+        el.innerHTML = '<div class="list-item warn" style="font-size:11px;">⚠️ API Paris indisponible · Appuyez sur 🔄 pour réessayer</div>';
+        return;
+      }
+
+      const clsMap = { 'fort': 'danger', 'modere': 'warn', 'faible': 'info' };
+      const html = events.map(ev =>
+        '<div class="list-item ' + (clsMap[ev.impact] || 'info') + '" style="flex-direction:column;gap:2px;">' +
+        '<span style="font-weight:700;font-size:.8rem;">🤖 ' + ev.titre + '</span>' +
+        '<span style="font-size:.7rem;opacity:.85">📍 ' + ev.zone + '</span>' +
+        '<span style="font-size:.68rem;font-weight:700;color:var(--gold);">' + ev.conseil + '</span>' +
+        '</div>'
+      ).join('');
+      el.innerHTML = html;
+      setLS(cacheKey, html);
+      setLS(cacheTs, String(Date.now()));
+    })
+    .catch(() => {
+      el.innerHTML = '<div class="list-item warn" style="font-size:11px;">⚠️ API Paris indisponible · Appuyez sur 🔄 pour réessayer</div>';
+    });
 }
 
 window.filterEvents = function(type, btn) {
@@ -2152,28 +2224,6 @@ const HOME = {
       return;
     }
 
-    // ── Protection quotas Gemini ──────────────────────────────────────
-    // TTL : 30 min entre deux appels réels (évite spam bouton + appels auto)
-    const IA_TTL_MS  = 30 * 60 * 1000; // 30 minutes
-    const lastCall   = parseInt(ls('wob_ia_last_call') || '0', 10);
-    const cachedText = ls('wob_ia');
-    const now        = Date.now();
-    const tripsSig   = trips.length; // Si nouvelles courses depuis dernier appel → on force le refresh
-
-    // On réutilise le cache SI : < 30min ET même nombre de courses
-    const lastTripsCount = parseInt(ls('wob_ia_last_trips') || '0', 10);
-    if (cachedText && (now - lastCall) < IA_TTL_MS && lastTripsCount === tripsSig) {
-      iaEl.textContent = cachedText;
-      return; // Cache valide, pas d'appel API
-    }
-
-    // Rate-limit : max 1 appel / 10 secondes (anti-double clic)
-    if ((now - lastCall) < 10_000) {
-      if (cachedText) iaEl.textContent = cachedText;
-      return;
-    }
-    // ─────────────────────────────────────────────────────────────────
-
     dotEl?.classList.add('active');
     iaEl.textContent = '⏳ Analyse de vos courses en cours...';
 
@@ -2289,23 +2339,8 @@ En te basant UNIQUEMENT sur ces données réelles, donne :
 
 Sois direct, chiffré, sans blabla. Parle comme un expert VTC, pas comme un chatbot générique. Max 6 phrases.`;
 
-    // ── Gemini Flash 2.0 — moteur IA principal (gratuit, CORS OK) ────
-    const GEMINI_KEY = 'AIzaSyAb8RN6Jxrrq7Te8iyhnqNqnHw3ZEey-six8X1Ivxa9KsXKbqvA';
-    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
-
     try {
-      const resp = await fetch(GEMINI_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 600, temperature: 0.4 }
-        })
-      });
-      if (!resp.ok) throw new Error(`Gemini API ${resp.status}`);
-      const data = await resp.json();
-      const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-      if (!text) throw new Error('Réponse Gemini vide');
+      const text = await callGemini(prompt, { maxTokens: 600, temperature: 0.4 });
       iaEl.textContent = text;
       setLS('wob_ia', text);
       setLS('wob_ia_last_call', String(Date.now()));
@@ -2332,8 +2367,6 @@ Sois direct, chiffré, sans blabla. Parle comme un expert VTC, pas comme un chat
       lines.push(`⛽ Carburant : ${fuelCost.toFixed(2)}€ sur ${totalKm.toFixed(0)} km — ratio net ${ratioKm > 0 ? (net / totalKm).toFixed(2) : '—'}€/km réel. ${ratioKm < 1.8 ? 'Réduisez les km à vide en restant dans les zones demande forte.' : 'Bonne maîtrise du kilométrage.'}`);
       iaEl.textContent = lines.join(' ');
       setLS('wob_ia', iaEl.textContent);
-      setLS('wob_ia_last_call', String(Date.now()));
-      setLS('wob_ia_last_trips', String(trips.length));
     } finally {
       dotEl?.classList.remove('active');
       // Projections
