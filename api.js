@@ -27,10 +27,17 @@ const WOB_CONFIG = {
   // ▶ Collez ici votre clé IDF Mobilités (obtenue sur prim.iledefrance-mobilites.fr)
   IDFM_KEY: 'odFJa9ooMgc5hHcNLGBAIfhMheIQZqUi',
 
-  // Navitia legacy (clé expirée — remplacée par PRIM ci-dessus)
-  NAVITIA_KEY: 'tmvRLg8J6MvXpjTFKOuqxwlIJ7oMtFtt',
-
-  // Supabase — clés intégrées
+  // Supabase — sauvegarde cloud automatique
+  // ▶ Table à créer dans votre projet Supabase (SQL Editor) :
+  // CREATE TABLE IF NOT EXISTS wob_sessions (
+  //   user_id TEXT PRIMARY KEY DEFAULT 'default',
+  //   updated_at TIMESTAMPTZ DEFAULT NOW(),
+  //   total_gain TEXT, total_km TEXT, total_trips TEXT,
+  //   depenses TEXT, goals TEXT, profile_name TEXT,
+  //   veh_modele TEXT, veh_type TEXT, ia_report TEXT
+  // );
+  // ALTER TABLE wob_sessions ENABLE ROW LEVEL SECURITY;
+  // CREATE POLICY "public_access" ON wob_sessions FOR ALL USING (true) WITH CHECK (true);
   SUPABASE_URL: 'https://ewdbcvygplepjefmpyap.supabase.co',
   SUPABASE_KEY: 'sb_publishable_p9s8AJ4KNBIEYd5vT4h3Dw_MDQjLwJY',
 
@@ -636,9 +643,9 @@ const NAVITIA = {
       disruptions = await this._fetchOpenDataIDFM();
     }
 
-    // ── SOURCE 3 : Fallback synthétique heure/jour ────────────────
+    // ── SOURCE 3 : Gemini — analyse intelligente des perturbations TC ──
     if (!disruptions) {
-      disruptions = this._buildSyntheticDisruptions();
+      disruptions = await this._fetchGeminiDisruptions();
     }
 
     setCache('wob_navitia', disruptions);
@@ -807,15 +814,51 @@ const NAVITIA = {
     return { alerts: unique, ts: Date.now(), _source: 'opendata' };
   },
 
-  _buildSyntheticDisruptions() {
-    const h = new Date().getHours(), d = new Date().getDay();
-    const isRush = (d >= 1 && d <= 5) && ((h >= 7 && h <= 9) || (h >= 17 && h <= 20));
-    return {
-      alerts: [],
-      ts: Date.now(),
-      _synthetic: true,
-      _rush: isRush,
-    };
+  async _fetchGeminiDisruptions() {
+    // Gemini analyse l'heure/jour et génère une analyse TC intelligente
+    // Cache 30min — bien meilleur que le fallback statique heure de pointe
+    try {
+      const h    = new Date().getHours();
+      const d    = new Date().getDay();
+      const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][d];
+      const date = new Date().toISOString().split('T')[0];
+
+      if (typeof callGemini !== 'function') throw new Error('callGemini non défini');
+
+      const prompt = [
+        'Tu es expert réseau RATP/SNCF Paris. Nous sommes ' + jour + ' ' + date + ' a ' + h + 'h.',
+        'Y a-t-il des perturbations connues ou travaux programmés sur RER A, RER B, RER C, RER D, Metro 13, Metro 4, Metro 1 ?',
+        'Tiens compte : travaux nuit (apres 22h), travaux week-end habituels, horaires de pointe (7h-9h, 17h-20h).',
+        'Si réseau normal dis-le clairement.',
+        'JSON strict uniquement :',
+        '{"alerts":[{"line":"RER A","icon":"🔴","msg":"description","isMajor":true,"impact":"high"}],"summary":"etat global"}',
+        'Si aucune perturbation : {"alerts":[],"summary":"Réseau normal"}',
+      ].join(' ');
+
+      const text  = await callGemini(prompt, { maxTokens: 350, temperature: 0.2 });
+      const clean = text.replace(/```json|```/g, '').trim();
+      const match = clean.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('JSON introuvable');
+      const data  = JSON.parse(match[0]);
+
+      const alerts = (data.alerts || []).map(a => ({
+        line: a.line || '', icon: a.icon || '🚇',
+        impact: a.impact || 'medium', isMajor: !!a.isMajor,
+        msg: (a.msg || '').slice(0, 150),
+        zones: this.DISRUPTION_ZONES?.[a.line] || [],
+        _source: 'gemini',
+      }));
+
+      LOG('Gemini TC OK:', alerts.length, 'alertes');
+      return { alerts, summary: data.summary || '', ts: Date.now(), _source: 'gemini' };
+
+    } catch(e) {
+      ERR('Gemini TC:', e.message);
+      // Fallback minimal — juste heure de pointe, sans message inscription
+      const h = new Date().getHours(), d = new Date().getDay();
+      const isRush = (d >= 1 && d <= 5) && ((h >= 7 && h <= 9) || (h >= 17 && h <= 20));
+      return { alerts: [], ts: Date.now(), _synthetic: true, _rush: isRush };
+    }
   },
 
   parseDisruptions(disruptions) {
@@ -861,49 +904,27 @@ const NAVITIA = {
     const cont = el('navitia-container'); if (!cont) return;
     const alerts = data.alerts || [];
 
-    // Affichage selon la source des données
+    // Fallback synthétique — heure de pointe sans données externes
     if (data._synthetic) {
       const h = new Date().getHours(), d = new Date().getDay();
       const isRush = (d >= 1 && d <= 5) && ((h >= 7 && h <= 9) || (h >= 17 && h <= 20));
-      // Donner un conseil actionnable même sans données temps réel
-      const rushTip = isRush
-        ? '⚠️ Heure de pointe détectée — Positionnez-vous près des grandes gares'
-        : '✅ Circulation normale estimée sur le réseau TC';
-      cont.innerHTML = `
-        <div class="list-item ${isRush ? 'warn' : 'ok'}" style="border-radius:10px;font-weight:700;">
-          ${rushTip}
-        </div>
-        <div style="background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px;margin-top:8px;">
-          <div style="font-size:11px;font-weight:700;color:var(--gold);margin-bottom:6px;">📡 Activer les alertes temps réel</div>
-          <div style="font-size:10px;color:var(--text-dim);line-height:1.6;">
-            Inscrivez-vous gratuitement sur
-            <strong style="color:var(--text)">prim.iledefrance-mobilites.fr</strong>
-            et collez votre clé dans <code style="background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;">IDFM_KEY</code> dans <code>api.js</code>
-            pour recevoir les pannes RER/Métro en temps réel.
-          </div>
-        </div>`;
+      cont.innerHTML =
+        '<div class="list-item ' + (isRush ? 'warn' : 'ok') + '" style="border-radius:10px;font-weight:700;">' +
+        (isRush ? '⚠️ Heure de pointe — Positionnez-vous près des grandes gares' : '✅ Circulation normale estimée sur le réseau TC') +
+        '</div>';
       return;
     }
 
-    // Source connue mais 0 perturbation = réseau nominal
-    if (!alerts.length && (data._source === 'prim_ok' || data._source === 'opendata_ok')) {
-      cont.innerHTML = `
-        <div class="list-item ok" style="border-radius:10px;font-weight:700;">
-          ✅ Réseau transports en commun — Aucune perturbation
-        </div>
-        <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">
-          ${data._source === 'prim' || data._source === 'prim_ok' ? '📡 Source : PRIM IDFM temps réel' : '📡 Source : Open Data IDFM'}
-          · ${new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}
-        </div>`;
-      return;
-    }
-
+    // Aucune perturbation — afficher summary Gemini si dispo
     if (!alerts.length) {
-      cont.innerHTML = `
-        <div class="list-item ok" style="border-radius:10px;font-weight:700;">
-          ✅ Réseau transports en commun — Trafic normal
-        </div>
-        <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">RER A/B/C/D · Métro surveillés · ${new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</div>`;
+      const srcLabel = (data._source === 'prim' || data._source === 'prim_ok') ? '📡 PRIM IDFM temps réel'
+        : data._source === 'gemini' ? '🤖 Analyse Gemini'
+        : '📡 Open Data IDFM';
+      const summary = data.summary || 'Aucune perturbation sur les lignes surveillées';
+      cont.innerHTML =
+        '<div class="list-item ok" style="border-radius:10px;font-weight:700;">✅ ' + summary + '</div>' +
+        '<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">' + srcLabel +
+        ' · ' + new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) + '</div>';
       return;
     }
 

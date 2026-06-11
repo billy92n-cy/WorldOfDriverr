@@ -26,6 +26,311 @@ async function callGemini(prompt, { maxTokens = 600, temperature = 0.4 } = {}) {
   return text;
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+//  GEMINI IA MODULES — Coach · Planning · Progression · Rapport
+//  Budget : ~6 appels/jour max — TTL stricts pour respecter quotas
+// ══════════════════════════════════════════════════════════════════
+
+const WOD_IA = {
+
+  // ── Helpers cache ────────────────────────────────────────────
+  _get(key)        { try { return localStorage.getItem(key); } catch(e) { return null; } },
+  _set(key, val)   { try { localStorage.setItem(key, val); } catch(e) {} },
+  _age(tsKey)      { return Date.now() - parseInt(this._get(tsKey) || '0'); },
+  _ok(tsKey, ttl)  { return this._age(tsKey) < ttl; },
+
+  // ── Collecte données chauffeur ───────────────────────────────
+  _buildDriverContext() {
+    const trips    = JSON.parse(this._get('wob_sessions') || '[]');
+    const weekHist = JSON.parse(this._get('wob_week_history') || '[]');
+    const hourData = JSON.parse(this._get('wob_hours')   || 'null') || new Array(24).fill(0);
+    const dayData  = JSON.parse(this._get('wob_weekday') || 'null') || new Array(7).fill(0);
+    const goals    = JSON.parse(this._get('wob_goals')   || '{}');
+    const conso    = parseFloat(this._get('wob_conso'))  || 6.5;
+    const pCarb    = parseFloat(this._get('wob_prix'))   || 1.85;
+    const vehType  = this._get('wob_veh_type') || 'essence';
+    const name     = this._get('wob_name') || 'Chauffeur';
+
+    // Stats semaine courante
+    const totalGain = trips.reduce((s,t) => s+(t.gain||0), 0);
+    const totalKm   = trips.reduce((s,t) => s+(t.km||0), 0);
+    const fuelCost  = totalKm*(conso/100)*pCarb;
+    const net       = totalGain - fuelCost;
+    const avgTrip   = trips.length ? totalGain/trips.length : 0;
+
+    // Stats aujourd'hui
+    const today    = new Date(); today.setHours(0,0,0,0);
+    const todayT   = trips.filter(t => t.date && new Date(t.date) >= today);
+    const dayGain  = todayT.reduce((s,t) => s+(t.gain||0), 0);
+    const dayTrips = todayT.length;
+
+    // Meilleure heure (index max dans hourData)
+    const bestH = hourData.indexOf(Math.max(...hourData));
+    const dayNames = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
+    const bestDay  = dayData.indexOf(Math.max(...dayData));
+
+    // Historique semaines (3 dernières)
+    const recentWeeks = weekHist.slice(0,3).map(w =>
+      `S${new Date(w.ts).toLocaleDateString('fr-FR',{day:'numeric',month:'short'})} : ${w.gain.toFixed(0)}€ brut, ${w.trips} courses, ${w.km.toFixed(0)}km`
+    ).join(' | ');
+
+    const h = new Date().getHours();
+    const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
+
+    return {
+      name, trips, totalGain, totalKm, net, avgTrip, fuelCost,
+      dayGain, dayTrips, goals, bestH, bestDay: dayNames[bestDay],
+      recentWeeks, h, jour, conso, pCarb, vehType,
+      tripsCount: trips.length,
+    };
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  //  MODULE A — COACH CONNEXION (1 appel/jour, TTL 6h)
+  //  → Recommande l'heure idéale de connexion basée sur l'historique
+  // ════════════════════════════════════════════════════════════════
+  async loadCoachConnexion() {
+    const el = document.getElementById('ia-coach-connexion');
+    if (!el) return;
+
+    const TTL = 6 * 60 * 60 * 1000; // 6h
+    if (this._ok('wod_coach_conn_ts', TTL)) {
+      const cached = this._get('wod_coach_conn');
+      if (cached) { el.innerHTML = cached; return; }
+    }
+
+    el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">🤖 Analyse de votre historique...</div>';
+
+    const d = this._buildDriverContext();
+    if (d.tripsCount < 3) {
+      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Enregistrez au moins 3 courses pour activer le coach connexion.</div>';
+      return;
+    }
+
+    const prompt = [
+      `Chauffeur VTC Paris "${d.name}". ${d.tripsCount} courses enregistrées.`,
+      `Meilleure heure historique : ${d.bestH}h. Meilleur jour : ${d.bestDay}.`,
+      d.recentWeeks ? `Historique semaines : ${d.recentWeeks}.` : '',
+      `Objectif journalier : ${d.goals.day || 0}€. Moyenne/course : ${d.avgTrip.toFixed(2)}€.`,
+      `Nous sommes ${d.jour} à ${d.h}h.`,
+      'En 2 phrases MAX, dis-lui : 1) a quelle heure se connecter aujourd hui et pourquoi (chiffres a l appui)',
+      '2) une zone prioritaire selon l heure recommandee. Direct, pas de blabla.',
+    ].join(' ');
+
+    try {
+      const text = await callGemini(prompt, { maxTokens: 150, temperature: 0.3 });
+      const html = '<div style="font-size:.78rem;line-height:1.6;color:var(--text);">🎯 ' + text + '</div>';
+      el.innerHTML = html;
+      this._set('wod_coach_conn', html);
+      this._set('wod_coach_conn_ts', Date.now().toString());
+    } catch(e) {
+      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Coach connexion temporairement indisponible.</div>';
+    }
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  //  MODULE B — PLANNING QUOTIDIEN (1 appel/jour, TTL jusqu'à minuit)
+  //  → Heure début optimale, heure fin estimée, courses nécessaires
+  // ════════════════════════════════════════════════════════════════
+  async loadPlanningJour() {
+    const el = document.getElementById('ia-planning-jour');
+    if (!el) return;
+
+    // TTL jusqu'à minuit
+    const midnight = new Date(); midnight.setHours(24,0,0,0);
+    const ttlMidnight = midnight.getTime() - Date.now();
+    if (this._ok('wod_planning_ts', ttlMidnight)) {
+      const cached = this._get('wod_planning');
+      if (cached) { el.innerHTML = cached; return; }
+    }
+
+    const d = this._buildDriverContext();
+    if (!d.goals.day || d.goals.day === 0) {
+      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Définissez un objectif journalier pour activer le planning automatique.</div>';
+      return;
+    }
+
+    el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">🤖 Génération de votre planning...</div>';
+
+    const coursesNeeded = d.avgTrip > 0 ? Math.ceil((d.goals.day - d.dayGain) / d.avgTrip) : '?';
+    const prompt = [
+      `Chauffeur VTC Paris. ${d.jour} ${d.h}h. Objectif jour : ${d.goals.day}€. Déjà gagné : ${d.dayGain.toFixed(2)}€.`,
+      `Moyenne/course : ${d.avgTrip.toFixed(2)}€. Meilleure heure historique : ${d.bestH}h.`,
+      `Il lui faut encore environ ${coursesNeeded} courses. Véhicule ${d.vehType}.`,
+      'Génère un planning en JSON strict :',
+      '{"debut":"HHhMM","fin_estimee":"HHhMM","courses_restantes":N,"zones":["zone1","zone2"],"tip":"conseil 1 phrase"}',
+      'Rien d\'autre que le JSON.',
+    ].join(' ');
+
+    try {
+      const text  = await callGemini(prompt, { maxTokens: 200, temperature: 0.2 });
+      const clean = text.replace(/```json|```/g, '').trim();
+      const match = clean.match(/\{[\s\S]*\}/);
+      let html;
+      if (match) {
+        const p = JSON.parse(match[0]);
+        html = [
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">',
+          `<div style="background:rgba(212,168,67,.08);border:1px solid rgba(212,168,67,.2);border-radius:10px;padding:10px;text-align:center;">`,
+          `<div style="font-size:.65rem;color:var(--text-dim);margin-bottom:2px;">🕐 Début conseillé</div>`,
+          `<div style="font-size:1.1rem;font-weight:800;color:var(--gold);">${p.debut || '--'}</div></div>`,
+          `<div style="background:rgba(212,168,67,.08);border:1px solid rgba(212,168,67,.2);border-radius:10px;padding:10px;text-align:center;">`,
+          `<div style="font-size:.65rem;color:var(--text-dim);margin-bottom:2px;">🏁 Fin estimée</div>`,
+          `<div style="font-size:1.1rem;font-weight:800;color:var(--gold);">${p.fin_estimee || '--'}</div></div>`,
+          '</div>',
+          p.zones?.length ? `<div style="font-size:.72rem;color:var(--text-dim);margin-bottom:6px;">📍 Zones : <strong style="color:var(--text)">${p.zones.join(' → ')}</strong></div>` : '',
+          p.tip ? `<div style="font-size:.75rem;color:var(--text);line-height:1.5;">💡 ${p.tip}</div>` : '',
+        ].join('');
+      } else {
+        html = '<div style="font-size:.75rem;color:var(--text);">🗓 ' + text + '</div>';
+      }
+      el.innerHTML = html;
+      this._set('wod_planning', html);
+      this._set('wod_planning_ts', Date.now().toString());
+    } catch(e) {
+      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Planning temporairement indisponible.</div>';
+    }
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  //  MODULE C — PROGRESSION TEMPS RÉEL (déclenché après chaque course, TTL 10min)
+  //  → Remplace les projections statiques par une analyse dynamique
+  // ════════════════════════════════════════════════════════════════
+  async loadProgression() {
+    const el = document.getElementById('ia-progression');
+    if (!el) return;
+
+    const TTL = 10 * 60 * 1000; // 10min
+    if (this._ok('wod_prog_ts', TTL)) {
+      const cached = this._get('wod_prog');
+      if (cached) { el.innerHTML = cached; return; }
+    }
+
+    const d = this._buildDriverContext();
+    if (d.dayTrips === 0 || !d.goals.day) {
+      el.innerHTML = '';
+      return;
+    }
+
+    const restant = Math.max(0, d.goals.day - d.dayGain);
+    const pct     = d.goals.day > 0 ? Math.min(100, (d.dayGain / d.goals.day * 100)).toFixed(0) : 0;
+    const prompt  = [
+      `Chauffeur VTC Paris. ${d.jour} ${d.h}h. Objectif jour : ${d.goals.day}€.`,
+      `Déjà : ${d.dayGain.toFixed(2)}€ (${d.dayTrips} courses). Reste : ${restant.toFixed(2)}€.`,
+      `Moyenne course aujourd'hui : ${d.dayTrips ? (d.dayGain/d.dayTrips).toFixed(2) : d.avgTrip.toFixed(2)}€.`,
+      'En 1 phrase ultra-courte (max 15 mots) : dis-lui combien de courses et combien de temps restants pour atteindre l objectif.',
+      'Exemple : Encore 3 courses, environ 1h30 de travail pour atteindre l objectif.',
+    ].join(' ');
+
+    try {
+      const text = await callGemini(prompt, { maxTokens: 80, temperature: 0.2 });
+      const html = [
+        '<div style="margin-top:10px;padding:10px;background:rgba(212,168,67,.06);border:1px solid rgba(212,168,67,.15);border-radius:10px;">',
+        `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">`,
+        `<span style="font-size:.7rem;color:var(--text-dim);">Progression objectif jour</span>`,
+        `<span style="font-size:.8rem;font-weight:800;color:var(--gold);">${pct}%</span>`,
+        '</div>',
+        `<div style="background:rgba(255,255,255,.08);border-radius:4px;height:4px;margin-bottom:8px;">`,
+        `<div style="background:var(--gold);height:4px;border-radius:4px;width:${pct}%;transition:width .5s;"></div></div>`,
+        `<div style="font-size:.75rem;color:var(--text);line-height:1.5;">🤖 ${text}</div>`,
+        '</div>',
+      ].join('');
+      el.innerHTML = html;
+      this._set('wod_prog', html);
+      this._set('wod_prog_ts', Date.now().toString());
+    } catch(e) {
+      el.innerHTML = '';
+    }
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  //  MODULE D — RAPPORT QUOTIDIEN (1 appel/jour si ≥3 courses)
+  //  → Résumé journée, points forts/faibles, conseil demain
+  // ════════════════════════════════════════════════════════════════
+  async loadRapportJour() {
+    const el = document.getElementById('ia-rapport-jour');
+    if (!el) return;
+
+    const d = this._buildDriverContext();
+    if (d.dayTrips < 3) {
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = '';
+
+    const midnight = new Date(); midnight.setHours(24,0,0,0);
+    const ttlMidnight = midnight.getTime() - Date.now();
+    if (this._ok('wod_rapport_jour_ts', ttlMidnight)) {
+      const cached = this._get('wod_rapport_jour');
+      if (cached) { el.innerHTML = cached; return; }
+    }
+
+    el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">🤖 Génération du rapport journalier...</div>';
+
+    const todayTrips = d.trips.filter(t => {
+      const td = new Date(); td.setHours(0,0,0,0);
+      return t.date && new Date(t.date) >= td;
+    });
+    const todayKm    = todayTrips.reduce((s,t) => s+(t.km||0), 0);
+    const todayMin   = todayTrips.reduce((s,t) => s+(t.duree||0), 0);
+    const todayFuel  = todayKm * (d.conso/100) * d.pCarb;
+    const todayNet   = d.dayGain - todayFuel;
+    const bestCourse = Math.max(...todayTrips.map(t => t.gain));
+    const hourly     = todayMin > 0 ? (d.dayGain/todayMin)*60 : 0;
+    const objPct     = d.goals.day > 0 ? (d.dayGain/d.goals.day*100).toFixed(0) : 'N/A';
+
+    const prompt = [
+      `Chauffeur VTC Paris. Fin de journée ${d.jour}.`,
+      `Résultats : ${d.dayTrips} courses, ${d.dayGain.toFixed(2)}€ brut, ${todayNet.toFixed(2)}€ net, ${todayKm.toFixed(0)}km.`,
+      `Taux horaire : ${hourly.toFixed(2)}€/h. Meilleure course : ${bestCourse.toFixed(2)}€. Objectif atteint à ${objPct}%.`,
+      `Moyenne/course : ${(d.dayGain/d.dayTrips).toFixed(2)}€.`,
+      'Fais un rapport en JSON :',
+      '{"pointFort":"une phrase","pointFaible":"une phrase","demain":"conseil concret 1 phrase","note":7}',
+      'note sur 10. JSON strict, rien d autre.',
+    ].join(' ');
+
+    try {
+      const text  = await callGemini(prompt, { maxTokens: 250, temperature: 0.3 });
+      const clean = text.replace(/```json|```/g, '').trim();
+      const match = clean.match(/\{[\s\S]*\}/);
+      let html;
+      if (match) {
+        const r = JSON.parse(match[0]);
+        const noteColor = r.note >= 8 ? '#4ade80' : r.note >= 6 ? '#d4a843' : '#ff4d6a';
+        html = [
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">',
+          '<span style="font-size:.8rem;font-weight:700;">📊 Rapport du jour</span>',
+          r.note ? `<span style="margin-left:auto;font-size:1rem;font-weight:800;color:${noteColor};">${r.note}/10</span>` : '',
+          '</div>',
+          r.pointFort  ? `<div style="font-size:.75rem;line-height:1.5;margin-bottom:6px;">✅ <strong>Point fort :</strong> ${r.pointFort}</div>` : '',
+          r.pointFaible? `<div style="font-size:.75rem;line-height:1.5;margin-bottom:6px;">⚠️ <strong>À améliorer :</strong> ${r.pointFaible}</div>` : '',
+          r.demain     ? `<div style="font-size:.75rem;line-height:1.5;padding:8px;background:rgba(212,168,67,.06);border-radius:8px;border-left:3px solid var(--gold);">💡 <strong>Demain :</strong> ${r.demain}</div>` : '',
+        ].join('');
+      } else {
+        html = '<div style="font-size:.75rem;color:var(--text);">📊 ' + text + '</div>';
+      }
+      el.innerHTML = html;
+      this._set('wod_rapport_jour', html);
+      this._set('wod_rapport_jour_ts', Date.now().toString());
+    } catch(e) {
+      el.style.display = 'none';
+    }
+  },
+
+  // ── Initialisation — appelé au boot et après chaque course ───
+  async init(afterTrip = false) {
+    await this.loadCoachConnexion();
+    await this.loadPlanningJour();
+    if (afterTrip || document.getElementById('ia-progression')) {
+      await this.loadProgression();
+    }
+    await this.loadRapportJour();
+  },
+};
+
+window.WOD_IA = WOD_IA;
+
 "use strict";
 
 // ══════════════════════════════════════════════════
@@ -127,6 +432,8 @@ function initApp() {
   checkAlerts();
   scheduleAutoBackup();
   updateHeroDate();
+  // Modules IA Gemini — légèrement différé pour ne pas bloquer le rendu
+  setTimeout(() => WOD_IA.init(false), 2000);
 }
 window.initApp = initApp;
 window._initAppCore = initApp;
@@ -658,6 +965,7 @@ const IDF_ZONES = [
 
 function getRushStatus() {
   const h=new Date().getHours(), d=new Date().getDay();
+  // Statique immédiat (affiché instantanément)
   if (d===5&&h>=17&&h<=23) return { title:'RUSH Vendredi soir', sub:'Surge probable — Zone centrale', cls:'danger' };
   if (d===6&&h>=20)        return { title:'Nuit Samedi — Forte demande', sub:'Zone festive · Grands Boulevards', cls:'danger' };
   if (d===6&&h>=12)        return { title:'Samedi après-midi', sub:'Shopping · Loisirs — Activité élevée', cls:'warn' };
@@ -665,6 +973,27 @@ function getRushStatus() {
   if (d>=1&&d<=5&&h>=17&&h<=20) return { title:'Rush soir (17h–20h)', sub:'Fort trafic — Positions stratégiques', cls:'warn' };
   if (h>=22||h<=5) return { title:'Nuit — Faible demande', sub:'Repos conseillé · CDG si actif', cls:'info' };
   return { title:'Activité normale', sub:'Trafic fluide attendu', cls:'ok' };
+}
+
+// Enrichissement Gemini du statut rush (async, cache 20min)
+async function enrichRushWithGemini() {
+  const el = $('rush-sub'); if (!el) return;
+  const AGE = Date.now() - parseInt(ls('wob_rush_ts') || '0');
+  if (AGE < 20 * 60 * 1000) { const c = ls('wob_rush_tip'); if (c) { el.textContent = c; return; } }
+  const h = new Date().getHours();
+  const d = new Date().getDay();
+  const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][d];
+  const events = ls('wob_events');
+  const evtCtx = events ? JSON.parse(events).slice(0,2).map(e=>e.title).join(', ') : '';
+  const prompt = 'VTC Paris. ' + jour + ' ' + h + 'h. '
+    + (evtCtx ? 'Evenements du moment : ' + evtCtx + '. ' : '')
+    + 'En 8 mots MAX : quelle zone cibler maintenant et pourquoi ? Tres direct.';
+  try {
+    const tip = await callGemini(prompt, { maxTokens: 40, temperature: 0.4 });
+    el.textContent = tip.trim();
+    setLS('wob_rush_tip', tip.trim());
+    setLS('wob_rush_ts', Date.now().toString());
+  } catch(e) {}
 }
 
 window.loadTraffic = async function() {
@@ -676,6 +1005,9 @@ window.loadTraffic = async function() {
   const dayNames = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
   const jour = dayNames[new Date().getDay()];
   const consEl = $('rush-conseils');
+
+  // Enrichissement Gemini du sous-titre rush (async, 20min TTL)
+  enrichRushWithGemini();
 
   // Conseils statiques immédiats (affichage instantané)
   const conseilsStatiques = [];
@@ -774,7 +1106,7 @@ window.loadEvents = async function(forceRefresh) {
   const cache    = ls('wob_events');
   const cacheTs  = parseInt(ls('wob_events_ts') || '0');
   const cacheAge = Date.now() - cacheTs;
-  const CACHE_MAX = 30 * 60 * 1000;
+  const CACHE_MAX = 3 * 60 * 60 * 1000; // 3h — Gemini liste stable
 
   if (!forceRefresh && cache && cacheAge < CACHE_MAX) {
     renderEvents(JSON.parse(cache));
@@ -796,7 +1128,9 @@ window.loadEvents = async function(forceRefresh) {
       const prompt = 'Tu es un expert VTC parisien. Nous sommes ' + jour + ' ' + today + ' a ' + h + 'h. Liste 6 evenements REELS ou tres probables a Paris dans les 7 prochains jours creant de la demande VTC (concerts Bercy/AccorArenas, matchs PSG, salons Porte de Versailles, expos, manifestations, festivals...). Sois precis sur les lieux et dates. Reponds UNIQUEMENT en JSON valide, rien d autre : [{"title":"...","date_start":"YYYY-MM-DD","address_name":"lieu exact Paris","address_zipcode":"75XXX","tags":"type evenement","impact":"fort|modere|faible"}]';
       const text = await callGemini(prompt, { maxTokens: 600, temperature: 0.3 });
       const clean = text.replace(/```json|```/g, '').trim();
-      const evts = JSON.parse(clean);
+      const jsonMatch = clean.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) throw new Error('JSON introuvable');
+      const evts = JSON.parse(jsonMatch[0]);
       if (evts?.length >= 1) {
         results = evts;
         console.log('[Events] Gemini principal OK:', results.length);
@@ -851,7 +1185,6 @@ window.loadEvents = async function(forceRefresh) {
   }
 };
 
-    const sorted2 = null; // nettoyage bloc orphelin supprimé
 
 function getEventImpact(ev) {
   const txt = ((ev.title||'')+(ev.tags||'')+(ev.address_name||'')).toLowerCase();
@@ -909,7 +1242,8 @@ function renderEventsFallback(el) {
       let events;
       try {
         const clean = text.replace(/```json|```/g, '').trim();
-        events = JSON.parse(clean);
+        const match = clean.match(/\[[\s\S]*\]/);
+        events = match ? JSON.parse(match[0]) : null;
       } catch(e) { events = null; }
 
       if (!events || !events.length) {
@@ -1558,8 +1892,38 @@ function checkAlerts() {
       text.textContent = alerts[0].msg;
       banner.classList.remove('hidden');
     }
-    // Add to notif
     alerts.forEach(a => addNotification(a.msg, a.cls));
+
+    // Conseil Gemini sur les démarches à faire (cache 24h — ça ne change pas)
+    const alertCacheKey = 'wob_alert_conseil';
+    const alertCacheTs  = 'wob_alert_conseil_ts';
+    const alertAge = Date.now() - parseInt(ls(alertCacheTs) || '0');
+    const alertsEl = $('alerts-list');
+    if (alertsEl && alertAge > 24 * 60 * 60 * 1000) {
+      const alertsSummary = alerts.map(a => a.msg).join(', ');
+      const prompt = 'Chauffeur VTC Paris. Documents : ' + alertsSummary
+        + '. En 2 phrases courtes : quelles demarches faire en priorite et combien de temps ca prend ? Direct, actionnable.';
+      callGemini(prompt, { maxTokens: 100, temperature: 0.3 })
+        .then(conseil => {
+          const tip = document.createElement('div');
+          tip.className = 'list-item info';
+          tip.style.cssText = 'font-size:.75rem;border-left:3px solid var(--gold);padding-left:10px;margin-top:6px;';
+          tip.innerHTML = '💡 ' + conseil;
+          alertsEl.appendChild(tip);
+          setLS(alertCacheKey, conseil);
+          setLS(alertCacheTs, Date.now().toString());
+        })
+        .catch(() => {});
+    } else if (alertsEl) {
+      const cached = ls(alertCacheKey);
+      if (cached) {
+        const tip = document.createElement('div');
+        tip.className = 'list-item info';
+        tip.style.cssText = 'font-size:.75rem;border-left:3px solid var(--gold);padding-left:10px;margin-top:6px;';
+        tip.innerHTML = '💡 ' + cached;
+        alertsEl.appendChild(tip);
+      }
+    }
   }
 }
 
@@ -2059,6 +2423,11 @@ const HOME = {
 
     haptic([20, 10, 40]);
     showToast(`✅ Course +${formatEuro(prix)} enregistrée`);
+    // Invalider cache progression + rapport après nouvelle course
+    localStorage.removeItem('wod_prog_ts');
+    localStorage.removeItem('wod_rapport_jour_ts');
+    setTimeout(() => WOD_IA.init(true), 800);
+    enrichRushWithGemini(); // Rafraîchir le tip rush après chaque course
   },
 
   // ── Supprimer une course ──────────────────────────
