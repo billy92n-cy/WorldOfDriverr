@@ -133,14 +133,14 @@ const WOD_IA = {
   //  MODULE B — PLANNING QUOTIDIEN (1 appel/jour, TTL jusqu'à minuit)
   //  → Heure début optimale, heure fin estimée, courses nécessaires
   // ════════════════════════════════════════════════════════════════
-  async loadPlanningJour() {
+  async loadPlanningJour(forceRefresh) {
     const el = document.getElementById('ia-planning-jour');
     if (!el) return;
 
     // TTL jusqu'à minuit
     const midnight = new Date(); midnight.setHours(24,0,0,0);
     const ttlMidnight = midnight.getTime() - Date.now();
-    if (this._ok('wod_planning_ts', ttlMidnight)) {
+    if (!forceRefresh && this._ok('wod_planning_ts', ttlMidnight)) {
       const cached = this._get('wod_planning');
       if (cached) { el.innerHTML = cached; return; }
     }
@@ -171,19 +171,20 @@ const WOD_IA = {
       if (match) {
         const p = JSON.parse(match[0]);
         html = [
-          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">',
-          `<div style="background:rgba(212,168,67,.08);border:1px solid rgba(212,168,67,.2);border-radius:10px;padding:10px;text-align:center;">`,
-          `<div style="font-size:.65rem;color:var(--text-dim);margin-bottom:2px;">🕐 Début conseillé</div>`,
-          `<div style="font-size:1.1rem;font-weight:800;color:var(--gold);">${p.debut || '--'}</div></div>`,
-          `<div style="background:rgba(212,168,67,.08);border:1px solid rgba(212,168,67,.2);border-radius:10px;padding:10px;text-align:center;">`,
-          `<div style="font-size:.65rem;color:var(--text-dim);margin-bottom:2px;">🏁 Fin estimée</div>`,
-          `<div style="font-size:1.1rem;font-weight:800;color:var(--gold);">${p.fin_estimee || '--'}</div></div>`,
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">',
+          `<div style="background:rgba(212,168,67,.06);border:1px solid rgba(212,168,67,.15);border-radius:14px;padding:12px;text-align:center;backdrop-filter:blur(8px);">`,
+          `<div style="font-size:.56rem;font-weight:800;letter-spacing:.12em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;">Début conseillé</div>`,
+          `<div style="font-size:1.2rem;font-weight:800;color:var(--gold);font-family:'DM Mono',monospace;">${p.debut || '--'}</div></div>`,
+          `<div style="background:rgba(212,168,67,.06);border:1px solid rgba(212,168,67,.15);border-radius:14px;padding:12px;text-align:center;backdrop-filter:blur(8px);">`,
+          `<div style="font-size:.56rem;font-weight:800;letter-spacing:.12em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;">Fin estimée</div>`,
+          `<div style="font-size:1.2rem;font-weight:800;color:var(--gold);font-family:'DM Mono',monospace;">${p.fin_estimee || '--'}</div></div>`,
           '</div>',
-          p.zones?.length ? `<div style="font-size:.72rem;color:var(--text-dim);margin-bottom:6px;">📍 Zones : <strong style="color:var(--text)">${p.zones.join(' → ')}</strong></div>` : '',
-          p.tip ? `<div style="font-size:.75rem;color:var(--text);line-height:1.5;">💡 ${p.tip}</div>` : '',
+          p.zones?.length ? `<div style="font-size:.72rem;color:var(--text-dim);margin-bottom:8px;letter-spacing:.02em;">Zones recommandées : <strong style="color:var(--text);font-weight:600;">${p.zones.join(' · ')}</strong></div>` : '',
+          p.tip ? `<div style="font-size:.76rem;color:var(--text2);line-height:1.6;border-left:2px solid rgba(212,168,67,.3);padding-left:10px;">${p.tip}</div>` : '',
+          p.courses_restantes ? `<div style="font-size:.7rem;color:var(--text-dim);margin-top:8px;">${p.courses_restantes} course${p.courses_restantes>1?'s':''} restante${p.courses_restantes>1?'s':''} estimée${p.courses_restantes>1?'s':''}</div>` : '',
         ].join('');
       } else {
-        html = '<div style="font-size:.75rem;color:var(--text);">🗓 ' + text + '</div>';
+        html = `<div style="font-size:.75rem;color:var(--text2);line-height:1.6;">${text}</div>`;
       }
       el.innerHTML = html;
       this._set('wod_planning', html);
@@ -449,7 +450,7 @@ function updateHeroDate() {
 //  NAVIGATION
 // ══════════════════════════════════════════════════
 const PAGE_LABELS = {
-  home:'Accueil', rush:'Rush', stats:'Stats', docs:'Documents',
+  home:'Revenue', rush:'Rush', stats:'Historique', docs:'B&F',
   controle:'Contrôle', pause:'Pause', profil:'Profil'
 };
 
@@ -464,7 +465,7 @@ window.goTo = function(id) {
   state.currentPage = id;
   const lbl = $('page-label');
   if (lbl) lbl.textContent = PAGE_LABELS[id] || id;
-  if (id === 'stats')    refreshCharts();
+  if (id === 'stats') { refreshCharts(); HOME._renderHistoriqueTrips(); HOME._renderHistoriqueDepenses(); }
   if (id === 'rush') {
     loadTraffic();
     // Corriger le rendu Leaflet quand l'onglet devient visible
@@ -560,42 +561,97 @@ function initMap() {
   const container = $('map');
   if (!container || state.leafletMap) return;
 
-  // Force fixed dimensions so Leaflet initialise même si la section est cachée
   container.style.height = '280px';
   container.style.width  = '100%';
   container.style.display = 'block';
 
   try {
     const map = L.map('map', {
-      zoomControl: true,
+      zoomControl: false,
       attributionControl: false,
-      // Centre Paris par défaut
     }).setView([48.8566, 2.3522], 10);
 
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       maxZoom: 18, subdomains: 'abcd',
     }).addTo(map);
 
-    HOT_ZONES.forEach(z => {
-      const radius = 30 + z.demand * 1.5;
-      L.circle([z.lat, z.lon], {
-        radius, color: z.color, fillColor: z.color,
-        fillOpacity: .22, weight: 1.5, opacity: .6,
-      }).addTo(map).bindPopup(`<b>${z.nom}</b><br>Demande : ${z.demand}%`);
-      L.circleMarker([z.lat, z.lon], {
-        radius: 5, color: z.color, fillColor: z.color, fillOpacity: 1, weight: 2,
-      }).addTo(map);
-    });
-
     state.leafletMap = map;
     window.state = state;
     updateMapPosition();
 
-    // invalidateSize multiple fois pour corriger le rendu quand la carte était cachée
+    // Demande à Gemini d'analyser les zones chaudes selon l'heure actuelle
+    _loadGeminiHeatmap(map);
+
     setTimeout(() => map.invalidateSize(true), 200);
     setTimeout(() => map.invalidateSize(true), 600);
     setTimeout(() => map.invalidateSize(true), 1200);
   } catch(e) { console.warn('Map init:', e); }
+}
+
+async function _loadGeminiHeatmap(map) {
+  const h    = new Date().getHours();
+  const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
+  const cacheKey = 'wod_heatmap_zones';
+  const cacheTs  = 'wod_heatmap_ts';
+  const age = Date.now() - parseInt(localStorage.getItem(cacheTs) || '0');
+
+  let zones = null;
+  if (age < 30 * 60 * 1000) {
+    try { zones = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch(e){}
+  }
+
+  if (!zones) {
+    const prompt = `Tu es un expert VTC Paris. Nous sommes ${jour} à ${h}h. Liste les 8 zones IDF avec le plus de demande VTC EN CE MOMENT selon les heures de rush typiques. Pour chaque zone donne précisément : nom, lat, lon (Paris IDF), intensité de demande de 0 à 100, couleur hex (rouge=#ff4d6a si >70, orange=#ff9955 si 40-70, vert=#2dd4a0 si <40). Reponds UNIQUEMENT en JSON : [{"nom":"...","lat":48.xx,"lon":2.xx,"demand":85,"color":"#ff4d6a","raison":"courte raison"}]`;
+    try {
+      const text = await callGemini(prompt, { maxTokens: 500, temperature: 0.3 });
+      const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim();
+      const match = clean.match(/\[[\s\S]*\]/);
+      if (match) {
+        zones = JSON.parse(match[0]);
+        localStorage.setItem(cacheKey, JSON.stringify(zones));
+        localStorage.setItem(cacheTs, Date.now().toString());
+      }
+    } catch(e) { console.warn('Gemini heatmap:', e); }
+  }
+
+  // Fallback si Gemini indisponible — zones statiques selon heure
+  if (!zones) {
+    zones = HOT_ZONES.map(z => ({ ...z, raison: 'Zone à forte demande' }));
+  }
+
+  // Effacer les anciennes zones
+  if (state._heatLayers) state._heatLayers.forEach(l => map.removeLayer(l));
+  state._heatLayers = [];
+
+  zones.forEach(z => {
+    const radius = 800 + (z.demand || 50) * 18;
+    const color  = z.color || '#ff9955';
+    const opacity = 0.12 + (z.demand || 50) / 100 * 0.2;
+
+    // Zone lumineuse fluide — pas de points, que des halos
+    const circle = L.circle([z.lat, z.lon], {
+      radius,
+      color: 'transparent',
+      fillColor: color,
+      fillOpacity: opacity,
+      weight: 0,
+    }).addTo(map).bindPopup(`<b>${z.nom}</b><br>${z.raison || ''}<br>Demande : ${z.demand || '?'}%`);
+
+    // Halo extérieur plus doux
+    const outerGlow = L.circle([z.lat, z.lon], {
+      radius: radius * 1.8,
+      color: 'transparent',
+      fillColor: color,
+      fillOpacity: opacity * 0.35,
+      weight: 0,
+    }).addTo(map);
+
+    state._heatLayers.push(circle, outerGlow);
+  });
+
+  // Mettre à jour le texte de légende
+  const legend = document.getElementById('map-gemini-legend');
+  if (legend) legend.textContent = `Analyse Gemini — ${jour} ${h}h — ${zones.length} zones actives`;
 }
 
 window.centerMap = function() {
@@ -781,21 +837,9 @@ function getWeekGain() {
 }
 
 function updateProjections(net, fuel) {
+  // Projections désactivées — utiliser le coach IA
   if (state.totalTrips === 0) return;
-  const avgPerTrip = state.totalGain / state.totalTrips;
-  const tripsPerDay = state.totalTrips / Math.max(1, getElapsedDays());
-  const projDay  = avgPerTrip * tripsPerDay;
-  const projWeek = projDay * 7;
-  const projMonth= projDay * 30;
-
-  const projHtml = `
-    <div class="proj-card"><div class="proj-lbl">Aujourd'hui</div><div class="proj-val">${formatEuro(projDay)}</div></div>
-    <div class="proj-card"><div class="proj-lbl">Semaine</div><div class="proj-val">${formatEuro(projWeek)}</div></div>
-    <div class="proj-card"><div class="proj-lbl">Mois</div><div class="proj-val">${formatEuro(projMonth)}</div></div>
-  `;
-  setText('ia-projections', '');
-  if ($('ia-projections')) $('ia-projections').innerHTML = projHtml;
-  if ($('stats-projections')) $('stats-projections').innerHTML = projHtml;
+  // Silencieux — les projections sont dans le coach IA
 }
 
 function getElapsedDays() {
@@ -1106,7 +1150,7 @@ window.loadEvents = async function(forceRefresh) {
   const cache    = ls('wob_events');
   const cacheTs  = parseInt(ls('wob_events_ts') || '0');
   const cacheAge = Date.now() - cacheTs;
-  const CACHE_MAX = 3 * 60 * 60 * 1000; // 3h — Gemini liste stable
+  const CACHE_MAX = 24 * 60 * 60 * 1000; // 24h — actualisation quotidienne
 
   if (!forceRefresh && cache && cacheAge < CACHE_MAX) {
     renderEvents(JSON.parse(cache));
@@ -2319,9 +2363,14 @@ const HOME = {
   },
   _restoreTrips() {
     const trips = this._getTrips();
-    this._renderRecentTrips(trips);
     const badge = $('trip-count-badge');
-    if (badge) badge.textContent = `${trips.length} course(s)`;
+    if (badge) badge.textContent = `${trips.length}`;
+    this._updateHistBadge(trips);
+  },
+
+  _updateHistBadge(trips) {
+    const b = $('hist-trip-count');
+    if (b) b.textContent = trips ? trips.length : this._getTrips().length;
   },
 
   // ── Prévisualisation temps réel ──────────────────
@@ -2411,7 +2460,7 @@ const HOME = {
     // Rafraîchir
     this._renderRecentTrips(trips);
     const badge = $('trip-count-badge');
-    if (badge) badge.textContent = `${trips.length} course(s)`;
+    if (badge) badge.textContent = `${trips.length}`;
     this._updateRevenueWidget();
     this._updateFuelWorkWidget();
     updateDashboard();
@@ -2453,7 +2502,8 @@ const HOME = {
 
     this._renderRecentTrips(newTrips);
     const badge = $('trip-count-badge');
-    if (badge) badge.textContent = `${newTrips.length} course(s)`;
+    if (badge) badge.textContent = `${newTrips.length}`;
+    this._updateHistBadge(newTrips);
     this._updateRevenueWidget();
     this._updateFuelWorkWidget();
     updateDashboard();
@@ -2462,39 +2512,55 @@ const HOME = {
 
   // ── Afficher les dernières courses ───────────────
   _renderRecentTrips(trips) {
-    const el = $('recent-trips'); if (!el) return;
-    if (!trips.length) { el.innerHTML = ''; return; }
-    const recent = [...trips].reverse().slice(0, 5);
-    el.innerHTML = `
-      <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim);margin-bottom:6px;">Dernières courses</div>
-      ${recent.map(t => {
-        const d    = new Date(t.date);
-        const time = d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
-        const day  = d.toLocaleDateString('fr-FR', { weekday:'short', day:'numeric', month:'short' });
-        const conso    = parseFloat(ls('wob_conso')) || 6.5;
-        const pCarb    = parseFloat(ls('wob_prix')) || 1.85;
-        const fuel     = t.km > 0 ? t.km * (conso/100) * pCarb : 0;
-        const net      = t.gain - fuel;
-        const ratioStr = t.km > 0 ? `${(t.gain/t.km).toFixed(2)}€/km` : '';
-        const timeStr  = t.duree > 0 ? `${t.duree}min` : '';
-        return `
-          <div class="trip-item" style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;margin-bottom:4px;">
-            <div class="trip-item-ico">🚗</div>
-            <div style="flex:1;min-width:0;">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="font-weight:700;font-size:.82rem;">${formatEuro(t.gain)}</span>
-                <span style="font-size:.88rem;font-weight:800;color:${net >= 0 ? 'var(--gold)' : 'var(--red)'};">${formatEuro(net)} net</span>
-              </div>
-              <div style="font-size:.68rem;color:var(--text-dim);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap;">
-                <span>📅 ${day} ${time}</span>
-                ${t.km > 0 ? `<span>📍 ${t.km}km</span>` : ''}
-                ${ratioStr ? `<span>⚡ ${ratioStr}</span>` : ''}
-                ${timeStr  ? `<span>⏱ ${timeStr}</span>` : ''}
-              </div>
-            </div>
-            <button onclick="HOME.deleteTrip(${t.id})" style="background:rgba(255,77,106,.1);border:1px solid rgba(255,77,106,.2);color:var(--red);border-radius:8px;padding:5px 8px;cursor:pointer;font-size:.7rem;flex-shrink:0;">✕</button>
-          </div>`;
-      }).join('')}`;
+    // On ne render plus ici — tout va dans l'historique
+    const badge = $('trip-count-badge');
+    if (badge) badge.textContent = `${trips.length}`;
+    this._updateHistBadge(trips);
+  },
+
+  // ── Historique complet des courses (onglet Historique) ─
+  _renderHistoriqueTrips() {
+    const el = $('hist-trips-list'); if (!el) return;
+    const trips = this._getTrips();
+    if (!trips.length) { el.innerHTML = '<p class="empty-hint">Aucune course enregistrée.</p>'; return; }
+    const conso = parseFloat(ls('wob_conso')) || 6.5;
+    const pCarb = parseFloat(ls('wob_prix'))  || 1.85;
+    const sorted = [...trips].reverse();
+    el.innerHTML = sorted.map(t => {
+      const d       = new Date(t.date);
+      const time    = d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+      const day     = d.toLocaleDateString('fr-FR', { weekday:'short', day:'numeric', month:'short' });
+      const fuel    = t.km > 0 ? t.km * (conso/100) * pCarb : 0;
+      const net     = t.gain - fuel;
+      const ratio   = t.km > 0 ? `${(t.gain/t.km).toFixed(2)} €/km` : '';
+      const duree   = t.duree > 0 ? `${t.duree} min` : '';
+      return `<div class="trip-item">
+        <div style="width:36px;height:36px;border-radius:10px;background:rgba(212,168,67,.08);border:1px solid rgba(212,168,67,.15);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </div>
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="font-weight:700;font-size:.85rem;color:var(--text);">${formatEuro(t.gain)}</span>
+            <span style="font-size:.85rem;font-weight:800;color:${net >= 0 ? 'var(--gold)' : 'var(--red)'};">${formatEuro(net)} net</span>
+          </div>
+          <div style="font-size:.66rem;color:var(--text2);margin-top:3px;display:flex;gap:8px;flex-wrap:wrap;">
+            <span>${day} ${time}</span>
+            ${t.km > 0 ? `<span>${t.km} km</span>` : ''}
+            ${ratio ? `<span>${ratio}</span>` : ''}
+            ${duree ? `<span>${duree}</span>` : ''}
+          </div>
+        </div>
+        <button onclick="HOME.deleteTrip(${t.id})" style="background:rgba(255,77,106,.08);border:1px solid rgba(255,77,106,.18);color:var(--red);border-radius:8px;padding:6px 9px;cursor:pointer;font-size:.72rem;flex-shrink:0;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        </button>
+      </div>`;
+    }).join('');
+  },
+
+  // ── Historique dépenses (onglet Historique) ─────
+  _renderHistoriqueDepenses() {
+    const el = $('hist-depenses'); if (!el) return;
+    renderDepenses(el);
   },
 
   // ── Widget Revenus ───────────────────────────────
@@ -2588,166 +2654,116 @@ const HOME = {
     el.title = `Reset automatique le ${nextReset.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' })} à 04h00`;
   },
 
-  // ── IA Coach Chauffeur ───────────────────────────
+  // ── IA Coach Chauffeur — Lignes structurées ─────
   async generateCoachReport() {
-    const iaEl  = $('ia-report');
     const dotEl = $('ia-dots');
-    if (!iaEl) return;
+    dotEl?.classList.add('active');
 
     const trips = this._getTrips();
+
+    const _setLine = (id, text) => {
+      const el = $(id);
+      if (el) { el.textContent = text; el.classList.add('active'); }
+    };
+
     if (!trips.length) {
-      iaEl.textContent = 'Enregistrez vos premières courses pour recevoir votre analyse personnalisée.';
+      _setLine('ia-line-revenus',    'Enregistrez vos premières courses.');
+      _setLine('ia-line-zones',      'Analyse en attente.');
+      _setLine('ia-line-carbu',      'Analyse en attente.');
+      _setLine('ia-line-motivation', 'Commencez à conduire pour activer le coach.');
+      _setLine('ia-line-restant',    'Définissez un objectif journalier.');
+      dotEl?.classList.remove('active');
       return;
     }
 
-    dotEl?.classList.add('active');
-    iaEl.textContent = '⏳ Analyse de vos courses en cours...';
+    const conso   = parseFloat(ls('wob_conso')) || 6.5;
+    const pCarb   = parseFloat(ls('wob_prix'))  || 1.85;
+    const vehType = ls('wob_veh_type') || 'essence';
+    const goals   = state.goals || { day:0, week:0, month:0 };
+    const h       = new Date().getHours();
+    const jour    = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
 
-    const conso    = parseFloat(ls('wob_conso')) || 6.5;
-    const pCarb    = parseFloat(ls('wob_prix'))  || 1.85;
-    const vehType  = ls('wob_veh_type') || 'essence';
-
-    // Stats courses
+    // Stats
     const gains    = trips.map(t => t.gain);
-    const total    = gains.reduce((a, b) => a + b, 0);
+    const total    = gains.reduce((a,b) => a+b, 0);
     const avg      = total / trips.length;
-    const best     = Math.max(...gains);
-    const worst    = Math.min(...gains);
-    const totalKm  = trips.reduce((s, t) => s + (t.km || 0), 0);
-    const totalMin = trips.reduce((s, t) => s + (t.duree || 0), 0);
-    const fuelCost = totalKm * (conso / 100) * pCarb;
+    const totalKm  = trips.reduce((s,t) => s+(t.km||0), 0);
+    const totalMin = trips.reduce((s,t) => s+(t.duree||0), 0);
+    const fuelCost = totalKm * (conso/100) * pCarb;
     const net      = total - fuelCost;
-    const hourly   = totalMin > 0 ? (total / totalMin) * 60 : 0;
-    const ratioKm  = totalKm > 0 ? total / totalKm : 0;
+    const hourly   = totalMin > 0 ? (total/totalMin)*60 : 0;
+    const ratioKm  = totalKm > 0 ? total/totalKm : 0;
+    const lowRatio = trips.filter(t => t.km>0 && t.gain/t.km < 1.5).length;
+    const premium  = trips.filter(t => t.gain >= 30).length;
 
-    // ── Analyse avancée des courses ──────────────────
-    // Répartition par plateforme (si dispo)
-    const platDist = {};
-    trips.forEach(t => {
-      const p = t.platform || 'Inconnue';
-      if (!platDist[p]) platDist[p] = { count: 0, gain: 0, km: 0 };
-      platDist[p].count++;
-      platDist[p].gain += t.gain;
-      platDist[p].km   += t.km || 0;
-    });
-    const platSummary = Object.entries(platDist)
-      .map(([p, d]) => `${p}: ${d.count} courses, moy ${(d.gain/d.count).toFixed(2)}€, ratio ${d.km>0?(d.gain/d.km).toFixed(2):'-'}€/km`)
-      .join(' | ');
+    // Calcul restant objectif journalier
+    const today = new Date(); today.setHours(0,0,0,0);
+    const dayGain = trips.filter(t => t.date && new Date(t.date) >= today).reduce((s,t) => s+(t.gain||0), 0);
+    const restant = goals.day > 0 ? Math.max(0, goals.day - dayGain) : null;
+    const coursesRestantes = restant && avg > 0 ? Math.ceil(restant / avg) : null;
 
-    // Courses refusables : gain < 8€ OU ratio < 1.5€/km OU durée > 45min pour gain < 20€
-    const lowValue   = trips.filter(t => t.gain < 8).length;
-    const lowRatio   = trips.filter(t => t.km > 0 && t.gain / t.km < 1.5).length;
-    const longCheap  = trips.filter(t => (t.duree || 0) > 45 && t.gain < 20).length;
+    // Cache TTL 30min
+    const cacheKey = 'wod_coach_lines';
+    const cacheTs  = 'wod_coach_lines_ts';
+    const cacheTrips = 'wod_coach_lines_trips';
+    const age = Date.now() - parseInt(ls(cacheTs) || '0');
+    const cachedTrips = parseInt(ls(cacheTrips) || '0');
 
-    // Courses premium : > 30€
-    const premium    = trips.filter(t => t.gain >= 30).length;
-    const premiumPct = ((premium / trips.length) * 100).toFixed(0);
-
-    // Créneau le plus rentable (€/course moyen par tranche horaire)
-    const hourRevenue = {};
-    trips.forEach(t => {
-      if (!t.date) return;
-      const h = new Date(t.date).getHours();
-      const bracket = h < 6 ? 'nuit (0-6h)' : h < 10 ? 'matin (6-10h)' : h < 14 ? 'midi (10-14h)' : h < 18 ? 'après-midi (14-18h)' : h < 22 ? 'soir (18-22h)' : 'soirée tardive (22-0h)';
-      if (!hourRevenue[bracket]) hourRevenue[bracket] = { total: 0, count: 0 };
-      hourRevenue[bracket].total += t.gain;
-      hourRevenue[bracket].count++;
-    });
-    const bestSlot = Object.entries(hourRevenue)
-      .map(([b, d]) => ({ bracket: b, avg: d.total / d.count, count: d.count }))
-      .sort((a, b) => b.avg - a.avg)[0];
-    const worstSlot = Object.entries(hourRevenue)
-      .map(([b, d]) => ({ bracket: b, avg: d.total / d.count, count: d.count }))
-      .sort((a, b) => a.avg - b.avg)[0];
-
-    // Jour de semaine le plus rentable
-    const dayNames = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
-    const dayRevenue = {};
-    trips.forEach(t => {
-      if (!t.date) return;
-      const day = dayNames[new Date(t.date).getDay()];
-      if (!dayRevenue[day]) dayRevenue[day] = { total: 0, count: 0 };
-      dayRevenue[day].total += t.gain;
-      dayRevenue[day].count++;
-    });
-    const bestDay = Object.entries(dayRevenue)
-      .map(([d, v]) => ({ day: d, avg: v.total / v.count }))
-      .sort((a, b) => b.avg - a.avg)[0];
-
-    // Durée moyenne des courses
-    const tripsWithDuration = trips.filter(t => t.duree > 0);
-    const avgDuration = tripsWithDuration.length > 0
-      ? tripsWithDuration.reduce((s, t) => s + t.duree, 0) / tripsWithDuration.length
-      : 0;
-
-    const prompt = `Tu es un expert VTC parisien spécialisé dans l'optimisation des revenus chauffeur. Ton rôle est d'analyser les données de courses réelles et de donner des conseils TRÈS CONCRETS et ACTIONNABLES pour aider le chauffeur à mieux choisir ses courses et maximiser ses gains nets.
-
-═══ DONNÉES RÉELLES DU CHAUFFEUR (${trips.length} courses) ═══
-
-PERFORMANCE GLOBALE :
-• Gains bruts : ${total.toFixed(2)}€ | Net après carburant : ${net.toFixed(2)}€
-• Moyenne/course : ${avg.toFixed(2)}€ | Meilleure : ${best.toFixed(2)}€ | Plus faible : ${worst.toFixed(2)}€
-• Distance totale : ${totalKm.toFixed(0)} km | Ratio moyen : ${ratioKm.toFixed(2)} €/km
-• Taux horaire : ${hourly.toFixed(2)} €/h | Durée moy/course : ${avgDuration.toFixed(0)} min
-• Carburant (${vehType}, ${conso}L/100km à ${pCarb}€/L) : ${fuelCost.toFixed(2)}€
-
-QUALITÉ DU PORTEFEUILLE DE COURSES :
-• Courses premium (≥30€) : ${premium}/${trips.length} (${premiumPct}%)
-• Courses peu rentables (<8€) : ${lowValue}/${trips.length}
-• Mauvais ratio (<1,5€/km) : ${lowRatio}/${trips.length}
-• Longues et bon marché (>45min, <20€) : ${longCheap}/${trips.length}
-
-CRÉNEAUX HORAIRES :
-• Meilleur créneau : ${bestSlot ? `${bestSlot.bracket} → moy ${bestSlot.avg.toFixed(2)}€/course (${bestSlot.count} courses)` : 'pas assez de données'}
-• Créneau le moins rentable : ${worstSlot ? `${worstSlot.bracket} → moy ${worstSlot.avg.toFixed(2)}€/course` : '-'}
-• Meilleur jour : ${bestDay ? `${bestDay.day} → moy ${bestDay.avg.toFixed(2)}€/course` : 'pas assez de données'}
-
-PLATEFORMES : ${platSummary || 'non renseigné'}
-
-OBJECTIFS : journalier ${state.goals?.day || 0}€ | hebdo ${state.goals?.week || 0}€ | mensuel ${state.goals?.month || 0}€
-
-═══ TA MISSION ═══
-En te basant UNIQUEMENT sur ces données réelles, donne :
-1. 🎯 UN CONSTAT PRÉCIS sur le point le plus critique (ex: trop de courses courtes peu rentables, mauvais créneaux, ratio €/km insuffisant...)
-2. ✅ DEUX RÈGLES CONCRÈTES à appliquer IMMÉDIATEMENT pour mieux choisir les courses (ex: refuser les courses X, privilégier Y, quitter la zone Z à telle heure...)
-3. 💡 UN CONSEIL sur le meilleur créneau/jour à exploiter selon ses données
-4. ⚡ UNE ACTION pour améliorer le taux horaire
-
-Sois direct, chiffré, sans blabla. Parle comme un expert VTC, pas comme un chatbot générique. Max 6 phrases.`;
-
-    try {
-      const text = await callGemini(prompt, { maxTokens: 600, temperature: 0.4 });
-      iaEl.textContent = text;
-      setLS('wob_ia', text);
-      setLS('wob_ia_last_call', String(Date.now()));
-      setLS('wob_ia_last_trips', String(trips.length));
-    } catch {
-      // Fallback local — analyse VTC sans API
-      const lines = [];
-      // Constat principal
-      if (lowRatio > trips.length * 0.3)
-        lines.push(`🎯 ${lowRatio} courses sur ${trips.length} sont sous 1,5€/km — c'est trop. Refusez systématiquement les courses < 8€ qui vous font perdre du temps moteur.`);
-      else if (hourly < 15)
-        lines.push(`⚠️ Taux horaire de ${hourly.toFixed(1)}€/h — insuffisant pour couvrir vos charges. Ciblez les courses aéroport (CDG/Orly) qui tournent entre 45€ et 80€.`);
-      else
-        lines.push(`✅ Bon taux horaire (${hourly.toFixed(1)}€/h) sur ${trips.length} courses — vous êtes dans la bonne dynamique.`);
-      // Conseil créneau
-      if (bestSlot && worstSlot && bestSlot.bracket !== worstSlot.bracket)
-        lines.push(`🕐 Votre créneau le plus rentable est ${bestSlot.bracket} (${bestSlot.avg.toFixed(2)}€/course moy) — concentrez-vous dessus et évitez ${worstSlot.bracket} (${worstSlot.avg.toFixed(2)}€/course).`);
-      // Courses premium
-      if (premium === 0)
-        lines.push(`💡 Aucune course ≥30€ détectée — activez la file d'attente CDG/Orly et les adresses affaires (La Défense, hôtels 4-5★) pour muscler votre panier moyen.`);
-      else
-        lines.push(`💡 ${premiumPct}% de courses premium (≥30€) — continuez à privilégier ces destinations.`);
-      // Carburant
-      lines.push(`⛽ Carburant : ${fuelCost.toFixed(2)}€ sur ${totalKm.toFixed(0)} km — ratio net ${ratioKm > 0 ? (net / totalKm).toFixed(2) : '—'}€/km réel. ${ratioKm < 1.8 ? 'Réduisez les km à vide en restant dans les zones demande forte.' : 'Bonne maîtrise du kilométrage.'}`);
-      iaEl.textContent = lines.join(' ');
-      setLS('wob_ia', iaEl.textContent);
-    } finally {
-      dotEl?.classList.remove('active');
-      // Projections
-      this._renderProjections(avg, trips.length);
+    let lines = null;
+    if (age < 30 * 60 * 1000 && cachedTrips === trips.length) {
+      try { lines = JSON.parse(ls(cacheKey) || 'null'); } catch(e){}
     }
+
+    if (!lines) {
+      const prompt = `Tu es expert VTC Paris. Chauffeur ${jour} ${h}h. Données: ${trips.length} courses, brut ${total.toFixed(2)}€, net ${net.toFixed(2)}€, moy ${avg.toFixed(2)}€/course, ratio ${ratioKm.toFixed(2)}€/km, taux ${hourly.toFixed(1)}€/h, carbu ${fuelCost.toFixed(2)}€ (${conso}L/100 à ${pCarb}€), ${lowRatio} courses sous 1.5€/km, ${premium} courses premium >=30€. Objectif jour ${goals.day}€, déjà ${dayGain.toFixed(2)}€. Reponds UNIQUEMENT en JSON strict: {"revenus":"une phrase courte sur la performance revenus, chiffrée, sans emoji","zones":"une phrase sur zones/créneaux à cibler maintenant, sans emoji","carburant":"une phrase sur gestion carburant et rentabilité km, sans emoji","motivation":"une phrase motivante courte et directe, sans emoji"}`;
+
+      try {
+        const text  = await callGemini(prompt, { maxTokens: 350, temperature: 0.4 });
+        const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim();
+        const match = clean.match(/\{[\s\S]*\}/);
+        if (match) {
+          lines = JSON.parse(match[0]);
+          setLS(cacheKey,  JSON.stringify(lines));
+          setLS(cacheTs,   Date.now().toString());
+          setLS(cacheTrips, String(trips.length));
+        }
+      } catch(e) { console.warn('Coach lines Gemini:', e); }
+    }
+
+    // Fallback local
+    if (!lines) {
+      lines = {
+        revenus:    hourly >= 15
+          ? `Taux horaire de ${hourly.toFixed(1)} €/h sur ${trips.length} courses — bonne dynamique.`
+          : `Taux horaire de ${hourly.toFixed(1)} €/h — ciblez CDG/Orly (45-80€) pour augmenter le panier.`,
+        zones:      h >= 7 && h <= 9   ? 'Rush matin actif — priorité gares et zones bureaux (La Défense, Part-Dieu).'
+                  : h >= 17 && h <= 20 ? 'Rush soir — positionnez-vous centres d\'affaires et restaurants.'
+                  : h >= 22            ? 'Nuit — CDG toutes les 30 min, zones festives Grands Boulevards.'
+                  :                      'Activité modérée — restez proches des hôtels et gares principales.',
+        carburant:  `Carburant: ${fuelCost.toFixed(2)} € pour ${totalKm.toFixed(0)} km — ${ratioKm < 1.8 ? 'réduisez les trajets à vide, restez dans les zones demande forte.' : 'bonne maîtrise des kilomètres à vide.'}`,
+        motivation: trips.length < 5 ? 'Chaque course compte — construisez votre historique pour affiner l\'analyse.'
+          : premium > 0 ? `${premium} courses premium enregistrées — continuez à cibler les longues distances.`
+          : 'Concentrez-vous sur la qualité plutôt que la quantité — une bonne course vaut trois mauvaises.',
+      };
+    }
+
+    _setLine('ia-line-revenus',    lines.revenus    || '—');
+    _setLine('ia-line-zones',      lines.zones      || '—');
+    _setLine('ia-line-carbu',      lines.carburant  || '—');
+    _setLine('ia-line-motivation', lines.motivation || '—');
+
+    // Ligne restant objectif — toujours calculé localement
+    if (restant !== null && coursesRestantes !== null) {
+      _setLine('ia-line-restant', restant > 0
+        ? `Il reste ${formatEuro(restant)} à atteindre, soit environ ${coursesRestantes} course${coursesRestantes > 1 ? 's' : ''} à ${formatEuro(avg)} de moyenne.`
+        : `Objectif journalier de ${formatEuro(goals.day)} atteint — continuez à optimiser le net.`);
+    } else if (goals.day === 0) {
+      _setLine('ia-line-restant', 'Définissez un objectif journalier dans Revenus & Objectifs.');
+    }
+
+    dotEl?.classList.remove('active');
+    setLS('wob_ia', JSON.stringify(lines));
+    this._renderProjections(avg, trips.length);
   },
 
   _renderProjections(avgPerTrip, tripsCount) {
