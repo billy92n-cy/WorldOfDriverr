@@ -46,7 +46,11 @@ const WOD_IA = {
     const weekHist = JSON.parse(this._get('wob_week_history') || '[]');
     const hourData = JSON.parse(this._get('wob_hours')   || 'null') || new Array(24).fill(0);
     const dayData  = JSON.parse(this._get('wob_weekday') || 'null') || new Array(7).fill(0);
-    const goals    = JSON.parse(this._get('wob_goals')   || '{}');
+    // Lire goals depuis state si disponible (source de vérité principale)
+    const _goalsRaw = (typeof state !== 'undefined' && state.goals)
+      ? state.goals
+      : JSON.parse(this._get('wob_goals') || '{}');
+    const goals = _goalsRaw;
     const conso    = parseFloat(this._get('wob_conso'))  || 6.5;
     const pCarb    = parseFloat(this._get('wob_prix'))   || 1.85;
     const vehType  = this._get('wob_veh_type') || 'essence';
@@ -2663,7 +2667,14 @@ const HOME = {
 
     const _setLine = (id, text) => {
       const el = $(id);
-      if (el) { el.textContent = text; el.classList.add('active'); }
+      if (!el) return;
+      // Mise en valeur des chiffres/montants en or
+      const formatted = text.replace(/(\d+[,.]?\d*\s*[€%]|\.\d+\s*€\/[a-zéèê]+)/g,
+        '<strong style="color:var(--gold);font-weight:700;">$1</strong>');
+      const textEl = el.querySelector('.ia-line-text');
+      if (textEl) { textEl.innerHTML = formatted; }
+      else { el.innerHTML = formatted; }
+      el.classList.add('active');
     };
 
     if (!trips.length) {
@@ -2778,6 +2789,22 @@ const HOME = {
       <div class="proj-card"><div class="proj-lbl">Projection/semaine</div><div class="proj-val">${formatEuro(projW)}</div></div>
       <div class="proj-card"><div class="proj-lbl">Projection/mois</div><div class="proj-val">${formatEuro(projM)}</div></div>`;
     if ($('stats-projections')) $('stats-projections').innerHTML = projEl.innerHTML;
+
+    // Alimenter widget Performances & Carburant (mis à jour à chaque recalcul)
+    const _conso = parseFloat(ls('wob_conso')) || 6.5;
+    const _prix  = parseFloat(ls('wob_prix'))  || 1.85;
+    const _km    = state.totalKm || 0;
+    const _mins  = state.sessions ? state.sessions.reduce((s,t) => s+(t.duree||0), 0) : 0;
+    const _gain  = state.totalGain || 0;
+    const _fuelL = _km * (_conso / 100);
+    const _fuelE = _fuelL * _prix;
+    const _hrly  = _mins > 0 ? (_gain / _mins) * 60 : 0;
+    const _ratio = _km > 0 ? _gain / _km : 0;
+    [['perf-hourly',   _hrly  > 0 ? _hrly.toFixed(1)  + ' €' : '—'],
+     ['perf-fuel-cost',_fuelE > 0 ? _fuelE.toFixed(2) + ' €' : '—'],
+     ['perf-fuel-l',   _fuelL > 0 ? _fuelL.toFixed(1) + ' L' : '—'],
+     ['perf-ratio-km', _ratio > 0 ? _ratio.toFixed(2) + ' €' : '—'],
+    ].forEach(([id, v]) => { const el = $(id); if (el) el.textContent = v; });
   },
   _renderWeekHistory() {
     const el = document.getElementById('week-history-list'); if (!el) return;
@@ -2807,6 +2834,21 @@ const HOME = {
 
 };
 window.HOME = HOME;
+
+// ══════════════════════════════════════════════════
+//  TOGGLE HISTORIQUE COURSES
+// ══════════════════════════════════════════════════
+window.toggleHistorique = function() {
+  const list = $('hist-trips-list');
+  const lbl  = $('hist-toggle-lbl');
+  const ico  = $('hist-toggle-ico');
+  if (!list) return;
+  const hidden = list.style.display === 'none';
+  list.style.display = hidden ? '' : 'none';
+  if (lbl) lbl.textContent = hidden ? 'Masquer' : 'Afficher';
+  if (ico) ico.style.transform = hidden ? '' : 'rotate(-90deg)';
+};
+
 window.generateIAReport = () => HOME.generateCoachReport();
 
 // Expose state globally for api.js

@@ -986,3 +986,28 @@ select.fi { -webkit-appearance:none; }
   from { opacity:0; transform:translateY(4px); }
   to   { opacity:1; transform:translateY(0); }
 }
+
+/* ── Widget Performances & Carburant ── */
+#widget-perfs .metrics-row { gap: 8px; flex-wrap: wrap; }
+#widget-perfs .mtile { min-width: 70px; flex: 1; }
+
+/* ── Toggle historique ── */
+#hist-toggle-btn svg { transition: transform .25s ease; }
+
+/* ── Coach IA lignes améliorées ── */
+.ia-coach-lines { display: flex; flex-direction: column; gap: 0; }
+.ia-line {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  transition: opacity .3s;
+}
+.ia-line:last-child { border-bottom: none; }
+.ia-line-label {
+  font-size: .58rem; font-weight: 800; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--gold); opacity: .7;
+}
+.ia-line-text {
+  font-size: .78rem; line-height: 1.55; color: var(--text2);
+}
+.ia-line.active .ia-line-text { color: var(--text); }
