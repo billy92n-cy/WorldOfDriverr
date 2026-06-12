@@ -26,316 +26,6 @@ async function callGemini(prompt, { maxTokens = 600, temperature = 0.4 } = {}) {
   return text;
 }
 
-
-// ══════════════════════════════════════════════════════════════════
-//  GEMINI IA MODULES — Coach · Planning · Progression · Rapport
-//  Budget : ~6 appels/jour max — TTL stricts pour respecter quotas
-// ══════════════════════════════════════════════════════════════════
-
-const WOD_IA = {
-
-  // ── Helpers cache ────────────────────────────────────────────
-  _get(key)        { try { return localStorage.getItem(key); } catch(e) { return null; } },
-  _set(key, val)   { try { localStorage.setItem(key, val); } catch(e) {} },
-  _age(tsKey)      { return Date.now() - parseInt(this._get(tsKey) || '0'); },
-  _ok(tsKey, ttl)  { return this._age(tsKey) < ttl; },
-
-  // ── Collecte données chauffeur ───────────────────────────────
-  _buildDriverContext() {
-    const trips    = JSON.parse(this._get('wob_sessions') || '[]');
-    const weekHist = JSON.parse(this._get('wob_week_history') || '[]');
-    const hourData = JSON.parse(this._get('wob_hours')   || 'null') || new Array(24).fill(0);
-    const dayData  = JSON.parse(this._get('wob_weekday') || 'null') || new Array(7).fill(0);
-    // Lire goals depuis state si disponible (source de vérité principale)
-    const _goalsRaw = (typeof state !== 'undefined' && state.goals)
-      ? state.goals
-      : JSON.parse(this._get('wob_goals') || '{}');
-    const goals = _goalsRaw;
-    const conso    = parseFloat(this._get('wob_conso'))  || 6.5;
-    const pCarb    = parseFloat(this._get('wob_prix'))   || 1.85;
-    const vehType  = this._get('wob_veh_type') || 'essence';
-    const name     = this._get('wob_name') || 'Chauffeur';
-
-    // Stats semaine courante
-    const totalGain = trips.reduce((s,t) => s+(t.gain||0), 0);
-    const totalKm   = trips.reduce((s,t) => s+(t.km||0), 0);
-    const fuelCost  = totalKm*(conso/100)*pCarb;
-    const net       = totalGain - fuelCost;
-    const avgTrip   = trips.length ? totalGain/trips.length : 0;
-
-    // Stats aujourd'hui
-    const today    = new Date(); today.setHours(0,0,0,0);
-    const todayT   = trips.filter(t => t.date && new Date(t.date) >= today);
-    const dayGain  = todayT.reduce((s,t) => s+(t.gain||0), 0);
-    const dayTrips = todayT.length;
-
-    // Meilleure heure (index max dans hourData)
-    const bestH = hourData.indexOf(Math.max(...hourData));
-    const dayNames = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
-    const bestDay  = dayData.indexOf(Math.max(...dayData));
-
-    // Historique semaines (3 dernières)
-    const recentWeeks = weekHist.slice(0,3).map(w =>
-      `S${new Date(w.ts).toLocaleDateString('fr-FR',{day:'numeric',month:'short'})} : ${w.gain.toFixed(0)}€ brut, ${w.trips} courses, ${w.km.toFixed(0)}km`
-    ).join(' | ');
-
-    const h = new Date().getHours();
-    const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
-
-    return {
-      name, trips, totalGain, totalKm, net, avgTrip, fuelCost,
-      dayGain, dayTrips, goals, bestH, bestDay: dayNames[bestDay],
-      recentWeeks, h, jour, conso, pCarb, vehType,
-      tripsCount: trips.length,
-    };
-  },
-
-  // ════════════════════════════════════════════════════════════════
-  //  MODULE A — COACH CONNEXION (1 appel/jour, TTL 6h)
-  //  → Recommande l'heure idéale de connexion basée sur l'historique
-  // ════════════════════════════════════════════════════════════════
-  async loadCoachConnexion() {
-    const el = document.getElementById('ia-coach-connexion');
-    if (!el) return;
-
-    const TTL = 6 * 60 * 60 * 1000; // 6h
-    if (this._ok('wod_coach_conn_ts', TTL)) {
-      const cached = this._get('wod_coach_conn');
-      if (cached) { el.innerHTML = cached; return; }
-    }
-
-    el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">🤖 Analyse de votre historique...</div>';
-
-    const d = this._buildDriverContext();
-    if (d.tripsCount < 3) {
-      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Enregistrez au moins 3 courses pour activer le coach connexion.</div>';
-      return;
-    }
-
-    const prompt = [
-      `Chauffeur VTC Paris "${d.name}". ${d.tripsCount} courses enregistrées.`,
-      `Meilleure heure historique : ${d.bestH}h. Meilleur jour : ${d.bestDay}.`,
-      d.recentWeeks ? `Historique semaines : ${d.recentWeeks}.` : '',
-      `Objectif journalier : ${d.goals.day || 0}€. Moyenne/course : ${d.avgTrip.toFixed(2)}€.`,
-      `Nous sommes ${d.jour} à ${d.h}h.`,
-      'En 2 phrases MAX, dis-lui : 1) a quelle heure se connecter aujourd hui et pourquoi (chiffres a l appui)',
-      '2) une zone prioritaire selon l heure recommandee. Direct, pas de blabla.',
-    ].join(' ');
-
-    try {
-      const text = await callGemini(prompt, { maxTokens: 150, temperature: 0.3 });
-      const html = '<div style="font-size:.78rem;line-height:1.6;color:var(--text);">🎯 ' + text + '</div>';
-      el.innerHTML = html;
-      this._set('wod_coach_conn', html);
-      this._set('wod_coach_conn_ts', Date.now().toString());
-    } catch(e) {
-      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Coach connexion temporairement indisponible.</div>';
-    }
-  },
-
-  // ════════════════════════════════════════════════════════════════
-  //  MODULE B — PLANNING QUOTIDIEN (1 appel/jour, TTL jusqu'à minuit)
-  //  → Heure début optimale, heure fin estimée, courses nécessaires
-  // ════════════════════════════════════════════════════════════════
-  async loadPlanningJour(forceRefresh) {
-    const el = document.getElementById('ia-planning-jour');
-    if (!el) return;
-
-    // TTL jusqu'à minuit
-    const midnight = new Date(); midnight.setHours(24,0,0,0);
-    const ttlMidnight = midnight.getTime() - Date.now();
-    if (!forceRefresh && this._ok('wod_planning_ts', ttlMidnight)) {
-      const cached = this._get('wod_planning');
-      if (cached) { el.innerHTML = cached; return; }
-    }
-
-    const d = this._buildDriverContext();
-    if (!d.goals.day || d.goals.day === 0) {
-      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Définissez un objectif journalier pour activer le planning automatique.</div>';
-      return;
-    }
-
-    el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">🤖 Génération de votre planning...</div>';
-
-    const coursesNeeded = d.avgTrip > 0 ? Math.ceil((d.goals.day - d.dayGain) / d.avgTrip) : '?';
-    const prompt = [
-      `Chauffeur VTC Paris. ${d.jour} ${d.h}h. Objectif jour : ${d.goals.day}€. Déjà gagné : ${d.dayGain.toFixed(2)}€.`,
-      `Moyenne/course : ${d.avgTrip.toFixed(2)}€. Meilleure heure historique : ${d.bestH}h.`,
-      `Il lui faut encore environ ${coursesNeeded} courses. Véhicule ${d.vehType}.`,
-      'Génère un planning en JSON strict :',
-      '{"debut":"HHhMM","fin_estimee":"HHhMM","courses_restantes":N,"zones":["zone1","zone2"],"tip":"conseil 1 phrase"}',
-      'Rien d\'autre que le JSON.',
-    ].join(' ');
-
-    try {
-      const text  = await callGemini(prompt, { maxTokens: 200, temperature: 0.2 });
-      const clean = text.replace(/```json|```/g, '').trim();
-      const match = clean.match(/\{[\s\S]*\}/);
-      let html;
-      if (match) {
-        const p = JSON.parse(match[0]);
-        html = [
-          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">',
-          `<div style="background:rgba(212,168,67,.06);border:1px solid rgba(212,168,67,.15);border-radius:14px;padding:12px;text-align:center;backdrop-filter:blur(8px);">`,
-          `<div style="font-size:.56rem;font-weight:800;letter-spacing:.12em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;">Début conseillé</div>`,
-          `<div style="font-size:1.2rem;font-weight:800;color:var(--gold);font-family:'DM Mono',monospace;">${p.debut || '--'}</div></div>`,
-          `<div style="background:rgba(212,168,67,.06);border:1px solid rgba(212,168,67,.15);border-radius:14px;padding:12px;text-align:center;backdrop-filter:blur(8px);">`,
-          `<div style="font-size:.56rem;font-weight:800;letter-spacing:.12em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;">Fin estimée</div>`,
-          `<div style="font-size:1.2rem;font-weight:800;color:var(--gold);font-family:'DM Mono',monospace;">${p.fin_estimee || '--'}</div></div>`,
-          '</div>',
-          p.zones?.length ? `<div style="font-size:.72rem;color:var(--text-dim);margin-bottom:8px;letter-spacing:.02em;">Zones recommandées : <strong style="color:var(--text);font-weight:600;">${p.zones.join(' · ')}</strong></div>` : '',
-          p.tip ? `<div style="font-size:.76rem;color:var(--text2);line-height:1.6;border-left:2px solid rgba(212,168,67,.3);padding-left:10px;">${p.tip}</div>` : '',
-          p.courses_restantes ? `<div style="font-size:.7rem;color:var(--text-dim);margin-top:8px;">${p.courses_restantes} course${p.courses_restantes>1?'s':''} restante${p.courses_restantes>1?'s':''} estimée${p.courses_restantes>1?'s':''}</div>` : '',
-        ].join('');
-      } else {
-        html = `<div style="font-size:.75rem;color:var(--text2);line-height:1.6;">${text}</div>`;
-      }
-      el.innerHTML = html;
-      this._set('wod_planning', html);
-      this._set('wod_planning_ts', Date.now().toString());
-    } catch(e) {
-      el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">Planning temporairement indisponible.</div>';
-    }
-  },
-
-  // ════════════════════════════════════════════════════════════════
-  //  MODULE C — PROGRESSION TEMPS RÉEL (déclenché après chaque course, TTL 10min)
-  //  → Remplace les projections statiques par une analyse dynamique
-  // ════════════════════════════════════════════════════════════════
-  async loadProgression() {
-    const el = document.getElementById('ia-progression');
-    if (!el) return;
-
-    const TTL = 10 * 60 * 1000; // 10min
-    if (this._ok('wod_prog_ts', TTL)) {
-      const cached = this._get('wod_prog');
-      if (cached) { el.innerHTML = cached; return; }
-    }
-
-    const d = this._buildDriverContext();
-    if (d.dayTrips === 0 || !d.goals.day) {
-      el.innerHTML = '';
-      return;
-    }
-
-    const restant = Math.max(0, d.goals.day - d.dayGain);
-    const pct     = d.goals.day > 0 ? Math.min(100, (d.dayGain / d.goals.day * 100)).toFixed(0) : 0;
-    const prompt  = [
-      `Chauffeur VTC Paris. ${d.jour} ${d.h}h. Objectif jour : ${d.goals.day}€.`,
-      `Déjà : ${d.dayGain.toFixed(2)}€ (${d.dayTrips} courses). Reste : ${restant.toFixed(2)}€.`,
-      `Moyenne course aujourd'hui : ${d.dayTrips ? (d.dayGain/d.dayTrips).toFixed(2) : d.avgTrip.toFixed(2)}€.`,
-      'En 1 phrase ultra-courte (max 15 mots) : dis-lui combien de courses et combien de temps restants pour atteindre l objectif.',
-      'Exemple : Encore 3 courses, environ 1h30 de travail pour atteindre l objectif.',
-    ].join(' ');
-
-    try {
-      const text = await callGemini(prompt, { maxTokens: 80, temperature: 0.2 });
-      const html = [
-        '<div style="margin-top:10px;padding:10px;background:rgba(212,168,67,.06);border:1px solid rgba(212,168,67,.15);border-radius:10px;">',
-        `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">`,
-        `<span style="font-size:.7rem;color:var(--text-dim);">Progression objectif jour</span>`,
-        `<span style="font-size:.8rem;font-weight:800;color:var(--gold);">${pct}%</span>`,
-        '</div>',
-        `<div style="background:rgba(255,255,255,.08);border-radius:4px;height:4px;margin-bottom:8px;">`,
-        `<div style="background:var(--gold);height:4px;border-radius:4px;width:${pct}%;transition:width .5s;"></div></div>`,
-        `<div style="font-size:.75rem;color:var(--text);line-height:1.5;">🤖 ${text}</div>`,
-        '</div>',
-      ].join('');
-      el.innerHTML = html;
-      this._set('wod_prog', html);
-      this._set('wod_prog_ts', Date.now().toString());
-    } catch(e) {
-      el.innerHTML = '';
-    }
-  },
-
-  // ════════════════════════════════════════════════════════════════
-  //  MODULE D — RAPPORT QUOTIDIEN (1 appel/jour si ≥3 courses)
-  //  → Résumé journée, points forts/faibles, conseil demain
-  // ════════════════════════════════════════════════════════════════
-  async loadRapportJour() {
-    const el = document.getElementById('ia-rapport-jour');
-    if (!el) return;
-
-    const d = this._buildDriverContext();
-    if (d.dayTrips < 3) {
-      el.style.display = 'none';
-      return;
-    }
-    el.style.display = '';
-
-    const midnight = new Date(); midnight.setHours(24,0,0,0);
-    const ttlMidnight = midnight.getTime() - Date.now();
-    if (this._ok('wod_rapport_jour_ts', ttlMidnight)) {
-      const cached = this._get('wod_rapport_jour');
-      if (cached) { el.innerHTML = cached; return; }
-    }
-
-    el.innerHTML = '<div style="font-size:.75rem;color:var(--text-dim);">🤖 Génération du rapport journalier...</div>';
-
-    const todayTrips = d.trips.filter(t => {
-      const td = new Date(); td.setHours(0,0,0,0);
-      return t.date && new Date(t.date) >= td;
-    });
-    const todayKm    = todayTrips.reduce((s,t) => s+(t.km||0), 0);
-    const todayMin   = todayTrips.reduce((s,t) => s+(t.duree||0), 0);
-    const todayFuel  = todayKm * (d.conso/100) * d.pCarb;
-    const todayNet   = d.dayGain - todayFuel;
-    const bestCourse = Math.max(...todayTrips.map(t => t.gain));
-    const hourly     = todayMin > 0 ? (d.dayGain/todayMin)*60 : 0;
-    const objPct     = d.goals.day > 0 ? (d.dayGain/d.goals.day*100).toFixed(0) : 'N/A';
-
-    const prompt = [
-      `Chauffeur VTC Paris. Fin de journée ${d.jour}.`,
-      `Résultats : ${d.dayTrips} courses, ${d.dayGain.toFixed(2)}€ brut, ${todayNet.toFixed(2)}€ net, ${todayKm.toFixed(0)}km.`,
-      `Taux horaire : ${hourly.toFixed(2)}€/h. Meilleure course : ${bestCourse.toFixed(2)}€. Objectif atteint à ${objPct}%.`,
-      `Moyenne/course : ${(d.dayGain/d.dayTrips).toFixed(2)}€.`,
-      'Fais un rapport en JSON :',
-      '{"pointFort":"une phrase","pointFaible":"une phrase","demain":"conseil concret 1 phrase","note":7}',
-      'note sur 10. JSON strict, rien d autre.',
-    ].join(' ');
-
-    try {
-      const text  = await callGemini(prompt, { maxTokens: 250, temperature: 0.3 });
-      const clean = text.replace(/```json|```/g, '').trim();
-      const match = clean.match(/\{[\s\S]*\}/);
-      let html;
-      if (match) {
-        const r = JSON.parse(match[0]);
-        const noteColor = r.note >= 8 ? '#4ade80' : r.note >= 6 ? '#d4a843' : '#ff4d6a';
-        html = [
-          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">',
-          '<span style="font-size:.8rem;font-weight:700;">📊 Rapport du jour</span>',
-          r.note ? `<span style="margin-left:auto;font-size:1rem;font-weight:800;color:${noteColor};">${r.note}/10</span>` : '',
-          '</div>',
-          r.pointFort  ? `<div style="font-size:.75rem;line-height:1.5;margin-bottom:6px;">✅ <strong>Point fort :</strong> ${r.pointFort}</div>` : '',
-          r.pointFaible? `<div style="font-size:.75rem;line-height:1.5;margin-bottom:6px;">⚠️ <strong>À améliorer :</strong> ${r.pointFaible}</div>` : '',
-          r.demain     ? `<div style="font-size:.75rem;line-height:1.5;padding:8px;background:rgba(212,168,67,.06);border-radius:8px;border-left:3px solid var(--gold);">💡 <strong>Demain :</strong> ${r.demain}</div>` : '',
-        ].join('');
-      } else {
-        html = '<div style="font-size:.75rem;color:var(--text);">📊 ' + text + '</div>';
-      }
-      el.innerHTML = html;
-      this._set('wod_rapport_jour', html);
-      this._set('wod_rapport_jour_ts', Date.now().toString());
-    } catch(e) {
-      el.style.display = 'none';
-    }
-  },
-
-  // ── Initialisation — appelé au boot et après chaque course ───
-  async init(afterTrip = false) {
-    await this.loadCoachConnexion();
-    await this.loadPlanningJour();
-    if (afterTrip || document.getElementById('ia-progression')) {
-      await this.loadProgression();
-    }
-    await this.loadRapportJour();
-  },
-};
-
-window.WOD_IA = WOD_IA;
-
 "use strict";
 
 // ══════════════════════════════════════════════════
@@ -432,13 +122,11 @@ function initApp() {
   initMap();
   renderRushChart();
   loadTraffic();
-  setTimeout(() => IA_EVENTS.load(false), 2000);
+  loadEvents(false);
   initDocForm();
   checkAlerts();
   scheduleAutoBackup();
   updateHeroDate();
-  // Modules IA Gemini — légèrement différé pour ne pas bloquer le rendu
-  setTimeout(() => WOD_IA.init(false), 2000);
 }
 window.initApp = initApp;
 window._initAppCore = initApp;
@@ -454,7 +142,7 @@ function updateHeroDate() {
 //  NAVIGATION
 // ══════════════════════════════════════════════════
 const PAGE_LABELS = {
-  home:'Revenue', rush:'Rush', stats:'Historique', docs:'B&F',
+  home:'Accueil', rush:'Rush', stats:'Stats', docs:'Documents',
   controle:'Contrôle', pause:'Pause', profil:'Profil'
 };
 
@@ -469,7 +157,7 @@ window.goTo = function(id) {
   state.currentPage = id;
   const lbl = $('page-label');
   if (lbl) lbl.textContent = PAGE_LABELS[id] || id;
-  if (id === 'stats') { refreshCharts(); HOME._renderHistoriqueTrips(); HOME._renderHistoriqueDepenses(); }
+  if (id === 'stats')    refreshCharts();
   if (id === 'rush') {
     loadTraffic();
     // Corriger le rendu Leaflet quand l'onglet devient visible
@@ -565,97 +253,42 @@ function initMap() {
   const container = $('map');
   if (!container || state.leafletMap) return;
 
+  // Force fixed dimensions so Leaflet initialise même si la section est cachée
   container.style.height = '280px';
   container.style.width  = '100%';
   container.style.display = 'block';
 
   try {
     const map = L.map('map', {
-      zoomControl: false,
+      zoomControl: true,
       attributionControl: false,
+      // Centre Paris par défaut
     }).setView([48.8566, 2.3522], 10);
 
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       maxZoom: 18, subdomains: 'abcd',
     }).addTo(map);
 
+    HOT_ZONES.forEach(z => {
+      const radius = 30 + z.demand * 1.5;
+      L.circle([z.lat, z.lon], {
+        radius, color: z.color, fillColor: z.color,
+        fillOpacity: .22, weight: 1.5, opacity: .6,
+      }).addTo(map).bindPopup(`<b>${z.nom}</b><br>Demande : ${z.demand}%`);
+      L.circleMarker([z.lat, z.lon], {
+        radius: 5, color: z.color, fillColor: z.color, fillOpacity: 1, weight: 2,
+      }).addTo(map);
+    });
+
     state.leafletMap = map;
     window.state = state;
     updateMapPosition();
 
-    // Demande à Gemini d'analyser les zones chaudes selon l'heure actuelle
-    _loadGeminiHeatmap(map);
-
+    // invalidateSize multiple fois pour corriger le rendu quand la carte était cachée
     setTimeout(() => map.invalidateSize(true), 200);
     setTimeout(() => map.invalidateSize(true), 600);
     setTimeout(() => map.invalidateSize(true), 1200);
   } catch(e) { console.warn('Map init:', e); }
-}
-
-async function _loadGeminiHeatmap(map) {
-  const h    = new Date().getHours();
-  const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
-  const cacheKey = 'wod_heatmap_zones';
-  const cacheTs  = 'wod_heatmap_ts';
-  const age = Date.now() - parseInt(localStorage.getItem(cacheTs) || '0');
-
-  let zones = null;
-  if (age < 30 * 60 * 1000) {
-    try { zones = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch(e){}
-  }
-
-  if (!zones) {
-    const prompt = `Tu es un expert VTC Paris. Nous sommes ${jour} à ${h}h. Liste les 8 zones IDF avec le plus de demande VTC EN CE MOMENT selon les heures de rush typiques. Pour chaque zone donne précisément : nom, lat, lon (Paris IDF), intensité de demande de 0 à 100, couleur hex (rouge=#ff4d6a si >70, orange=#ff9955 si 40-70, vert=#2dd4a0 si <40). Reponds UNIQUEMENT en JSON : [{"nom":"...","lat":48.xx,"lon":2.xx,"demand":85,"color":"#ff4d6a","raison":"courte raison"}]`;
-    try {
-      const text = await callGemini(prompt, { maxTokens: 500, temperature: 0.3 });
-      const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim();
-      const match = clean.match(/\[[\s\S]*\]/);
-      if (match) {
-        zones = JSON.parse(match[0]);
-        localStorage.setItem(cacheKey, JSON.stringify(zones));
-        localStorage.setItem(cacheTs, Date.now().toString());
-      }
-    } catch(e) { console.warn('Gemini heatmap:', e); }
-  }
-
-  // Fallback si Gemini indisponible — zones statiques selon heure
-  if (!zones) {
-    zones = HOT_ZONES.map(z => ({ ...z, raison: 'Zone à forte demande' }));
-  }
-
-  // Effacer les anciennes zones
-  if (state._heatLayers) state._heatLayers.forEach(l => map.removeLayer(l));
-  state._heatLayers = [];
-
-  zones.forEach(z => {
-    const radius = 800 + (z.demand || 50) * 18;
-    const color  = z.color || '#ff9955';
-    const opacity = 0.12 + (z.demand || 50) / 100 * 0.2;
-
-    // Zone lumineuse fluide — pas de points, que des halos
-    const circle = L.circle([z.lat, z.lon], {
-      radius,
-      color: 'transparent',
-      fillColor: color,
-      fillOpacity: opacity,
-      weight: 0,
-    }).addTo(map).bindPopup(`<b>${z.nom}</b><br>${z.raison || ''}<br>Demande : ${z.demand || '?'}%`);
-
-    // Halo extérieur plus doux
-    const outerGlow = L.circle([z.lat, z.lon], {
-      radius: radius * 1.8,
-      color: 'transparent',
-      fillColor: color,
-      fillOpacity: opacity * 0.35,
-      weight: 0,
-    }).addTo(map);
-
-    state._heatLayers.push(circle, outerGlow);
-  });
-
-  // Mettre à jour le texte de légende
-  const legend = document.getElementById('map-gemini-legend');
-  if (legend) legend.textContent = `Analyse Gemini — ${jour} ${h}h — ${zones.length} zones actives`;
 }
 
 window.centerMap = function() {
@@ -841,9 +474,21 @@ function getWeekGain() {
 }
 
 function updateProjections(net, fuel) {
-  // Projections désactivées — utiliser le coach IA
   if (state.totalTrips === 0) return;
-  // Silencieux — les projections sont dans le coach IA
+  const avgPerTrip = state.totalGain / state.totalTrips;
+  const tripsPerDay = state.totalTrips / Math.max(1, getElapsedDays());
+  const projDay  = avgPerTrip * tripsPerDay;
+  const projWeek = projDay * 7;
+  const projMonth= projDay * 30;
+
+  const projHtml = `
+    <div class="proj-card"><div class="proj-lbl">Aujourd'hui</div><div class="proj-val">${formatEuro(projDay)}</div></div>
+    <div class="proj-card"><div class="proj-lbl">Semaine</div><div class="proj-val">${formatEuro(projWeek)}</div></div>
+    <div class="proj-card"><div class="proj-lbl">Mois</div><div class="proj-val">${formatEuro(projMonth)}</div></div>
+  `;
+  setText('ia-projections', '');
+  if ($('ia-projections')) $('ia-projections').innerHTML = projHtml;
+  if ($('stats-projections')) $('stats-projections').innerHTML = projHtml;
 }
 
 function getElapsedDays() {
@@ -1013,7 +658,6 @@ const IDF_ZONES = [
 
 function getRushStatus() {
   const h=new Date().getHours(), d=new Date().getDay();
-  // Statique immédiat (affiché instantanément)
   if (d===5&&h>=17&&h<=23) return { title:'RUSH Vendredi soir', sub:'Surge probable — Zone centrale', cls:'danger' };
   if (d===6&&h>=20)        return { title:'Nuit Samedi — Forte demande', sub:'Zone festive · Grands Boulevards', cls:'danger' };
   if (d===6&&h>=12)        return { title:'Samedi après-midi', sub:'Shopping · Loisirs — Activité élevée', cls:'warn' };
@@ -1021,27 +665,6 @@ function getRushStatus() {
   if (d>=1&&d<=5&&h>=17&&h<=20) return { title:'Rush soir (17h–20h)', sub:'Fort trafic — Positions stratégiques', cls:'warn' };
   if (h>=22||h<=5) return { title:'Nuit — Faible demande', sub:'Repos conseillé · CDG si actif', cls:'info' };
   return { title:'Activité normale', sub:'Trafic fluide attendu', cls:'ok' };
-}
-
-// Enrichissement Gemini du statut rush (async, cache 20min)
-async function enrichRushWithGemini() {
-  const el = $('rush-sub'); if (!el) return;
-  const AGE = Date.now() - parseInt(ls('wob_rush_ts') || '0');
-  if (AGE < 20 * 60 * 1000) { const c = ls('wob_rush_tip'); if (c) { el.textContent = c; return; } }
-  const h = new Date().getHours();
-  const d = new Date().getDay();
-  const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][d];
-  const events = ls('wob_events');
-  const evtCtx = events ? JSON.parse(events).slice(0,2).map(e=>e.title).join(', ') : '';
-  const prompt = 'VTC Paris. ' + jour + ' ' + h + 'h. '
-    + (evtCtx ? 'Evenements du moment : ' + evtCtx + '. ' : '')
-    + 'En 8 mots MAX : quelle zone cibler maintenant et pourquoi ? Tres direct.';
-  try {
-    const tip = await callGemini(prompt, { maxTokens: 40, temperature: 0.4 });
-    el.textContent = tip.trim();
-    setLS('wob_rush_tip', tip.trim());
-    setLS('wob_rush_ts', Date.now().toString());
-  } catch(e) {}
 }
 
 window.loadTraffic = async function() {
@@ -1053,9 +676,6 @@ window.loadTraffic = async function() {
   const dayNames = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
   const jour = dayNames[new Date().getDay()];
   const consEl = $('rush-conseils');
-
-  // Enrichissement Gemini du sous-titre rush (async, 20min TTL)
-  enrichRushWithGemini();
 
   // Conseils statiques immédiats (affichage instantané)
   const conseilsStatiques = [];
@@ -1147,97 +767,184 @@ async function fetchRoute(zone) {
   } catch { return null; }
 }
 
-// ══════════════════════════════════════════════════
-//  IA ÉVÉNEMENTS PARIS — Gemini, cache 24h
-// ══════════════════════════════════════════════════
-const IA_EVENTS = {
-  CACHE_KEY: 'wod_ia_events',
-  CACHE_TS:  'wod_ia_events_ts',
-  CACHE_TTL: 24 * 60 * 60 * 1000, // 24 heures
+window.loadEvents = async function(forceRefresh) {
+  const el = $('events-list');
+  if (!el) return;
 
-  async load(forceRefresh = false) {
-    const listEl = $('ia-events-list');
-    const badge  = $('ia-events-cache-badge');
-    if (!listEl) return;
+  const cache    = ls('wob_events');
+  const cacheTs  = parseInt(ls('wob_events_ts') || '0');
+  const cacheAge = Date.now() - cacheTs;
+  const CACHE_MAX = 30 * 60 * 1000;
 
-    const cache   = ls(this.CACHE_KEY);
-    const cacheTs = parseInt(ls(this.CACHE_TS) || '0');
-    const age     = Date.now() - cacheTs;
-    const ageH    = Math.round(age / 3600000);
+  if (!forceRefresh && cache && cacheAge < CACHE_MAX) {
+    renderEvents(JSON.parse(cache));
+    return;
+  }
 
-    // Servir le cache si valide et pas de forceRefresh
-    if (!forceRefresh && cache && age < this.CACHE_TTL) {
-      listEl.innerHTML = cache;
-      if (badge) badge.textContent = `cache ${ageH}h`;
-      return;
-    }
+  el.innerHTML = `<div class="list-item info">🤖 Analyse des événements en cours...</div>`;
 
-    listEl.innerHTML = '<div class="list-item info">🤖 Gemini analyse les événements Paris...</div>';
-    if (badge) badge.textContent = '';
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    let results = null;
 
+    // ── SOURCE 1 : Gemini (principal) — direct, CORS natif, pas de proxy ──
+    // Gemini connaît les grands événements parisiens et génère une liste fiable
+    // On l'utilise EN PREMIER car les proxies publics sont instables
     try {
-      const now  = new Date();
-      const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][now.getDay()];
-      const dateStr = now.toISOString().split('T')[0];
-      const h = now.getHours();
+      const h    = new Date().getHours();
+      const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
+      const prompt = 'Tu es un expert VTC parisien. Nous sommes ' + jour + ' ' + today + ' a ' + h + 'h. Liste 6 evenements REELS ou tres probables a Paris dans les 7 prochains jours creant de la demande VTC (concerts Bercy/AccorArenas, matchs PSG, salons Porte de Versailles, expos, manifestations, festivals...). Sois precis sur les lieux et dates. Reponds UNIQUEMENT en JSON valide, rien d autre : [{"title":"...","date_start":"YYYY-MM-DD","address_name":"lieu exact Paris","address_zipcode":"75XXX","tags":"type evenement","impact":"fort|modere|faible"}]';
+      const text = await callGemini(prompt, { maxTokens: 600, temperature: 0.3 });
+      const clean = text.replace(/```json|```/g, '').trim();
+      const evts = JSON.parse(clean);
+      if (evts?.length >= 1) {
+        results = evts;
+        console.log('[Events] Gemini principal OK:', results.length);
+      }
+    } catch(eg) { console.warn('[Events] Gemini principal:', eg.message); }
 
-      const prompt = `Tu es un expert VTC parisien. Nous sommes ${jour} ${dateStr} à ${h}h.
-Liste 7 événements RÉELS ou très probables à Paris dans les 48 prochaines heures créant de la demande VTC premium.
-Inclus : concerts Bercy/AccorArenas, matchs PSG/Roland Garros, salons Porte de Versailles, grands événements culturels, manifestations connues.
-Pour chaque événement donne un conseil de positionnement VTC court et précis.
-Réponds UNIQUEMENT en JSON valide, rien d'autre :
-[{"titre":"...","lieu":"lieu exact Paris","date":"YYYY-MM-DD HH:mm","impact":"fort|modere|faible","conseil":"conseil 8 mots max","zone":"arrondissement ou quartier"}]`;
-
-      const text = await callGemini(prompt, { maxTokens: 800, temperature: 0.2 });
-      const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim();
-      const match = clean.match(/\[[\s\S]*\]/);
-      if (!match) throw new Error('JSON introuvable');
-      const events = JSON.parse(match[0]);
-      if (!events?.length) throw new Error('Liste vide');
-
-      const html = this._render(events);
-      ls(this.CACHE_KEY, html);
-      ls(this.CACHE_TS, String(Date.now()));
-      listEl.innerHTML = html;
-      if (badge) badge.textContent = "à l'instant";
-
-    } catch(e) {
-      console.warn('[IA_EVENTS] Erreur:', e.message);
-      const cached = ls(this.CACHE_KEY);
-      if (cached) {
-        listEl.innerHTML = cached;
-        if (badge) badge.textContent = `cache ${ageH}h`;
-        listEl.insertAdjacentHTML('afterbegin',
-          `<div class="list-item warn" style="font-size:11px;margin-bottom:6px;">⚠️ Réseau indisponible — données en cache</div>`);
-      } else {
-        listEl.innerHTML = '<div class="list-item warn">⚠️ Gemini indisponible — réessayez dans quelques secondes</div>';
+    // ── SOURCE 2 : que-faire-a-paris via proxy (fallback si Gemini KO) ──
+    if (!results) {
+      const QF_TARGET = 'https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records'
+        + '?where=' + encodeURIComponent("date_start >= date'" + today + "'")
+        + '&order_by=date_start&limit=20&select=title,date_start,address_name,address_zipcode,tags,url';
+      for (const proxy of [
+        'https://api.allorigins.win/raw?url=' + encodeURIComponent(QF_TARGET),
+        'https://corsproxy.io/?' + encodeURIComponent(QF_TARGET),
+      ]) {
+        if (results) break;
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 8000);
+          const r = await fetch(proxy, { signal: ctrl.signal });
+          clearTimeout(t);
+          if (!r.ok) continue;
+          const text = await r.text();
+          let parsed; try { parsed = JSON.parse(text); } catch(e) { continue; }
+          const raw = parsed.contents ? JSON.parse(parsed.contents) : parsed;
+          if (raw.results?.length >= 1) { results = raw.results; console.log('[Events] QFP proxy OK:', results.length); }
+        } catch(e) { console.warn('[Events] QFP proxy:', e.message); }
       }
     }
-  },
 
-  _render(events) {
-    const clsMap = { 'fort':'danger', 'modere':'warn', 'faible':'info' };
-    const impMap = { 'fort':'🔴 Fort impact VTC', 'modere':'🟡 Impact modéré', 'faible':'🟢 Faible impact' };
-    return events.map(ev => {
-      const cls = clsMap[ev.impact] || 'info';
-      const imp = impMap[ev.impact] || '';
-      const dateLabel = ev.date
-        ? (() => { try { return new Date(ev.date).toLocaleString('fr-FR',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}); } catch { return ev.date; } })()
-        : '';
-      return `<div class="list-item ${cls}" style="flex-direction:column;display:flex;gap:3px;padding:10px 12px;">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
-          <span style="font-weight:700;font-size:.82rem;flex:1;line-height:1.3">${ev.titre || 'Événement'}</span>
-          <span style="font-size:.68rem;font-weight:700;white-space:nowrap;opacity:.8">${imp}</span>
-        </div>
-        ${dateLabel ? `<span style="font-size:.72rem;opacity:.8">📅 ${dateLabel}</span>` : ''}
-        ${ev.lieu  ? `<span style="font-size:.7rem;opacity:.75">📍 ${ev.lieu}${ev.zone ? ' · ' + ev.zone : ''}</span>` : ''}
-        ${ev.conseil ? `<span style="font-size:.72rem;font-weight:700;color:var(--gold);margin-top:2px">💡 ${ev.conseil}</span>` : ''}
-      </div>`;
-    }).join('');
+    if (!results) throw new Error('Toutes les sources événements indisponibles');
+
+    const sorted = results
+      .map(ev => ({ ...ev, _impact: getEventImpact(ev) }))
+      .sort((a, b) => b._impact.score - a._impact.score);
+
+    ls('wob_events', JSON.stringify(sorted));
+    ls('wob_events_ts', Date.now().toString());
+    renderEvents(sorted);
+
+  } catch(e) {
+    console.warn('[Events] Toutes sources échouées:', e.message);
+    const cache2 = ls('wob_events');
+    if (cache2) {
+      const ageH = Math.round(cacheAge / 3600000);
+      renderEvents(JSON.parse(cache2));
+      el.insertAdjacentHTML('afterbegin',
+        `<div class="list-item warn" style="font-size:11px;border-radius:8px;margin-bottom:8px;">📡 Cache (${ageH}h) — Actualisez pour les derniers événements</div>`);
+    } else {
+      renderEventsFallback(el);
+    }
   }
 };
-window.IA_EVENTS = IA_EVENTS;
 
+    const sorted2 = null; // nettoyage bloc orphelin supprimé
+
+function getEventImpact(ev) {
+  const txt = ((ev.title||'')+(ev.tags||'')+(ev.address_name||'')).toLowerCase();
+  if (txt.match(/stade de france|bercy|accor arena|grand palais|parc des princes/))
+    return { label:'Très fort impact', cls:'danger', score:3 };
+  if (txt.match(/concert|festival|salon|finale|grand prix|marathon/))
+    return { label:'Fort impact', cls:'warn', score:2 };
+  if (txt.match(/theatre|spectacle|exposition|cinema|marché/))
+    return { label:'Impact modéré', cls:'info', score:1 };
+  return { label:'Faible impact', cls:'ok', score:0 };
+}
+
+function renderEvents(events) {
+  const el = $('events-list');
+  if (!el) return;
+  el.innerHTML = events.map(ev => {
+    const imp  = ev._impact;
+    const date = ev.date_start
+      ? new Date(ev.date_start).toLocaleDateString('fr-FR',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})
+      : '—';
+    const lieu = ev.address_name ? `${ev.address_name}${ev.address_zipcode?` (${ev.address_zipcode})`:''}` : '';
+    const lien = ev.url ? `<a href="${ev.url}" target="_blank" style="color:var(--gold);font-size:.68rem;font-weight:700;text-decoration:none">Voir →</a>` : '';
+    return `<div class="list-item ${imp.cls}" data-impact="${imp.score}" style="flex-direction:column;display:flex;gap:2px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
+        <span style="font-weight:700;font-size:.8rem;flex:1">${ev.title||'Événement'}</span>
+        ${lien}
+      </div>
+      <span style="font-size:.7rem;opacity:.85">${date}</span>
+      ${lieu ? `<span style="font-size:.68rem;opacity:.7">${lieu}</span>` : ''}
+      <span style="font-size:.68rem;font-weight:700">${imp.label}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderEventsFallback(el) {
+  const now  = new Date();
+  const h    = now.getHours();
+  const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][now.getDay()];
+  const date = now.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' });
+
+  el.innerHTML = '<div class="list-item info" style="font-size:11px;">🤖 Analyse des événements probables...</div>';
+
+  const cacheKey = 'wob_events_fallback';
+  const cacheTs  = 'wob_events_fallback_ts';
+  const age = Date.now() - parseInt(ls(cacheTs) || '0', 10);
+  if (age < 60 * 60 * 1000) {
+    const cached = ls(cacheKey);
+    if (cached) { el.innerHTML = cached; return; }
+  }
+
+  const prompt = `Tu es un expert VTC parisien. Nous sommes ${jour} ${date} a ${h}h. Liste 3 evenements ou flux de voyageurs PROBABLES aujourd hui a Paris qui creent de la demande VTC. Pour chaque evenement donne : titre court, zone Paris concernee, niveau d impact (fort/modere/faible), conseil de positionnement en 5 mots max. Reponds en JSON strict : [{"titre":"...","zone":"...","impact":"fort|modere|faible","conseil":"..."}] Rien d autre que le JSON.`;
+
+  callGemini(prompt, { maxTokens: 400, temperature: 0.5 })
+    .then(text => {
+      let events;
+      try {
+        const clean = text.replace(/```json|```/g, '').trim();
+        events = JSON.parse(clean);
+      } catch(e) { events = null; }
+
+      if (!events || !events.length) {
+        el.innerHTML = '<div class="list-item warn" style="font-size:11px;">⚠️ API Paris indisponible · Appuyez sur 🔄 pour réessayer</div>';
+        return;
+      }
+
+      const clsMap = { 'fort': 'danger', 'modere': 'warn', 'faible': 'info' };
+      const html = events.map(ev =>
+        '<div class="list-item ' + (clsMap[ev.impact] || 'info') + '" style="flex-direction:column;gap:2px;">' +
+        '<span style="font-weight:700;font-size:.8rem;">🤖 ' + ev.titre + '</span>' +
+        '<span style="font-size:.7rem;opacity:.85">📍 ' + ev.zone + '</span>' +
+        '<span style="font-size:.68rem;font-weight:700;color:var(--gold);">' + ev.conseil + '</span>' +
+        '</div>'
+      ).join('');
+      el.innerHTML = html;
+      setLS(cacheKey, html);
+      setLS(cacheTs, String(Date.now()));
+    })
+    .catch(() => {
+      el.innerHTML = '<div class="list-item warn" style="font-size:11px;">⚠️ API Paris indisponible · Appuyez sur 🔄 pour réessayer</div>';
+    });
+}
+
+window.filterEvents = function(type, btn) {
+  qsa('.ef-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  qsa('#events-list .list-item').forEach(item => {
+    const score = parseInt(item.dataset.impact || '0');
+    if (type==='all')    item.style.display='';
+    else if (type==='fort')  item.style.display = score>=2 ? '' : 'none';
+    else if (type==='mod')   item.style.display = score===1 ? '' : 'none';
+    else if (type==='faible') item.style.display = score===0 ? '' : 'none';
+  });
+};
 
 // ══════════════════════════════════════════════════
 //  POI
@@ -1851,38 +1558,8 @@ function checkAlerts() {
       text.textContent = alerts[0].msg;
       banner.classList.remove('hidden');
     }
+    // Add to notif
     alerts.forEach(a => addNotification(a.msg, a.cls));
-
-    // Conseil Gemini sur les démarches à faire (cache 24h — ça ne change pas)
-    const alertCacheKey = 'wob_alert_conseil';
-    const alertCacheTs  = 'wob_alert_conseil_ts';
-    const alertAge = Date.now() - parseInt(ls(alertCacheTs) || '0');
-    const alertsEl = $('alerts-list');
-    if (alertsEl && alertAge > 24 * 60 * 60 * 1000) {
-      const alertsSummary = alerts.map(a => a.msg).join(', ');
-      const prompt = 'Chauffeur VTC Paris. Documents : ' + alertsSummary
-        + '. En 2 phrases courtes : quelles demarches faire en priorite et combien de temps ca prend ? Direct, actionnable.';
-      callGemini(prompt, { maxTokens: 100, temperature: 0.3 })
-        .then(conseil => {
-          const tip = document.createElement('div');
-          tip.className = 'list-item info';
-          tip.style.cssText = 'font-size:.75rem;border-left:3px solid var(--gold);padding-left:10px;margin-top:6px;';
-          tip.innerHTML = '💡 ' + conseil;
-          alertsEl.appendChild(tip);
-          setLS(alertCacheKey, conseil);
-          setLS(alertCacheTs, Date.now().toString());
-        })
-        .catch(() => {});
-    } else if (alertsEl) {
-      const cached = ls(alertCacheKey);
-      if (cached) {
-        const tip = document.createElement('div');
-        tip.className = 'list-item info';
-        tip.style.cssText = 'font-size:.75rem;border-left:3px solid var(--gold);padding-left:10px;margin-top:6px;';
-        tip.innerHTML = '💡 ' + cached;
-        alertsEl.appendChild(tip);
-      }
-    }
   }
 }
 
@@ -2278,14 +1955,9 @@ const HOME = {
   },
   _restoreTrips() {
     const trips = this._getTrips();
+    this._renderRecentTrips(trips);
     const badge = $('trip-count-badge');
-    if (badge) badge.textContent = `${trips.length}`;
-    this._updateHistBadge(trips);
-  },
-
-  _updateHistBadge(trips) {
-    const b = $('hist-trip-count');
-    if (b) b.textContent = trips ? trips.length : this._getTrips().length;
+    if (badge) badge.textContent = `${trips.length} course(s)`;
   },
 
   // ── Prévisualisation temps réel ──────────────────
@@ -2375,7 +2047,7 @@ const HOME = {
     // Rafraîchir
     this._renderRecentTrips(trips);
     const badge = $('trip-count-badge');
-    if (badge) badge.textContent = `${trips.length}`;
+    if (badge) badge.textContent = `${trips.length} course(s)`;
     this._updateRevenueWidget();
     this._updateFuelWorkWidget();
     updateDashboard();
@@ -2387,11 +2059,6 @@ const HOME = {
 
     haptic([20, 10, 40]);
     showToast(`✅ Course +${formatEuro(prix)} enregistrée`);
-    // Invalider cache progression + rapport après nouvelle course
-    localStorage.removeItem('wod_prog_ts');
-    localStorage.removeItem('wod_rapport_jour_ts');
-    setTimeout(() => WOD_IA.init(true), 800);
-    enrichRushWithGemini(); // Rafraîchir le tip rush après chaque course
   },
 
   // ── Supprimer une course ──────────────────────────
@@ -2417,8 +2084,7 @@ const HOME = {
 
     this._renderRecentTrips(newTrips);
     const badge = $('trip-count-badge');
-    if (badge) badge.textContent = `${newTrips.length}`;
-    this._updateHistBadge(newTrips);
+    if (badge) badge.textContent = `${newTrips.length} course(s)`;
     this._updateRevenueWidget();
     this._updateFuelWorkWidget();
     updateDashboard();
@@ -2427,55 +2093,39 @@ const HOME = {
 
   // ── Afficher les dernières courses ───────────────
   _renderRecentTrips(trips) {
-    // On ne render plus ici — tout va dans l'historique
-    const badge = $('trip-count-badge');
-    if (badge) badge.textContent = `${trips.length}`;
-    this._updateHistBadge(trips);
-  },
-
-  // ── Historique complet des courses (onglet Historique) ─
-  _renderHistoriqueTrips() {
-    const el = $('hist-trips-list'); if (!el) return;
-    const trips = this._getTrips();
-    if (!trips.length) { el.innerHTML = '<p class="empty-hint">Aucune course enregistrée.</p>'; return; }
-    const conso = parseFloat(ls('wob_conso')) || 6.5;
-    const pCarb = parseFloat(ls('wob_prix'))  || 1.85;
-    const sorted = [...trips].reverse();
-    el.innerHTML = sorted.map(t => {
-      const d       = new Date(t.date);
-      const time    = d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
-      const day     = d.toLocaleDateString('fr-FR', { weekday:'short', day:'numeric', month:'short' });
-      const fuel    = t.km > 0 ? t.km * (conso/100) * pCarb : 0;
-      const net     = t.gain - fuel;
-      const ratio   = t.km > 0 ? `${(t.gain/t.km).toFixed(2)} €/km` : '';
-      const duree   = t.duree > 0 ? `${t.duree} min` : '';
-      return `<div class="trip-item">
-        <div style="width:36px;height:36px;border-radius:10px;background:rgba(212,168,67,.08);border:1px solid rgba(212,168,67,.15);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        </div>
-        <div style="flex:1;min-width:0;">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <span style="font-weight:700;font-size:.85rem;color:var(--text);">${formatEuro(t.gain)}</span>
-            <span style="font-size:.85rem;font-weight:800;color:${net >= 0 ? 'var(--gold)' : 'var(--red)'};">${formatEuro(net)} net</span>
-          </div>
-          <div style="font-size:.66rem;color:var(--text2);margin-top:3px;display:flex;gap:8px;flex-wrap:wrap;">
-            <span>${day} ${time}</span>
-            ${t.km > 0 ? `<span>${t.km} km</span>` : ''}
-            ${ratio ? `<span>${ratio}</span>` : ''}
-            ${duree ? `<span>${duree}</span>` : ''}
-          </div>
-        </div>
-        <button onclick="HOME.deleteTrip(${t.id})" style="background:rgba(255,77,106,.08);border:1px solid rgba(255,77,106,.18);color:var(--red);border-radius:8px;padding:6px 9px;cursor:pointer;font-size:.72rem;flex-shrink:0;">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-        </button>
-      </div>`;
-    }).join('');
-  },
-
-  // ── Historique dépenses (onglet Historique) ─────
-  _renderHistoriqueDepenses() {
-    const el = $('hist-depenses'); if (!el) return;
-    renderDepenses(el);
+    const el = $('recent-trips'); if (!el) return;
+    if (!trips.length) { el.innerHTML = ''; return; }
+    const recent = [...trips].reverse().slice(0, 5);
+    el.innerHTML = `
+      <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim);margin-bottom:6px;">Dernières courses</div>
+      ${recent.map(t => {
+        const d    = new Date(t.date);
+        const time = d.toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+        const day  = d.toLocaleDateString('fr-FR', { weekday:'short', day:'numeric', month:'short' });
+        const conso    = parseFloat(ls('wob_conso')) || 6.5;
+        const pCarb    = parseFloat(ls('wob_prix')) || 1.85;
+        const fuel     = t.km > 0 ? t.km * (conso/100) * pCarb : 0;
+        const net      = t.gain - fuel;
+        const ratioStr = t.km > 0 ? `${(t.gain/t.km).toFixed(2)}€/km` : '';
+        const timeStr  = t.duree > 0 ? `${t.duree}min` : '';
+        return `
+          <div class="trip-item" style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;margin-bottom:4px;">
+            <div class="trip-item-ico">🚗</div>
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-weight:700;font-size:.82rem;">${formatEuro(t.gain)}</span>
+                <span style="font-size:.88rem;font-weight:800;color:${net >= 0 ? 'var(--gold)' : 'var(--red)'};">${formatEuro(net)} net</span>
+              </div>
+              <div style="font-size:.68rem;color:var(--text-dim);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap;">
+                <span>📅 ${day} ${time}</span>
+                ${t.km > 0 ? `<span>📍 ${t.km}km</span>` : ''}
+                ${ratioStr ? `<span>⚡ ${ratioStr}</span>` : ''}
+                ${timeStr  ? `<span>⏱ ${timeStr}</span>` : ''}
+              </div>
+            </div>
+            <button onclick="HOME.deleteTrip(${t.id})" style="background:rgba(255,77,106,.1);border:1px solid rgba(255,77,106,.2);color:var(--red);border-radius:8px;padding:5px 8px;cursor:pointer;font-size:.7rem;flex-shrink:0;">✕</button>
+          </div>`;
+      }).join('')}`;
   },
 
   // ── Widget Revenus ───────────────────────────────
@@ -2569,123 +2219,166 @@ const HOME = {
     el.title = `Reset automatique le ${nextReset.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' })} à 04h00`;
   },
 
-  // ── IA Coach Chauffeur — Lignes structurées ─────
+  // ── IA Coach Chauffeur ───────────────────────────
   async generateCoachReport() {
+    const iaEl  = $('ia-report');
     const dotEl = $('ia-dots');
-    dotEl?.classList.add('active');
+    if (!iaEl) return;
 
     const trips = this._getTrips();
-
-    const _setLine = (id, text) => {
-      const el = $(id);
-      if (!el) return;
-      // Mise en valeur des chiffres/montants en or
-      const formatted = text.replace(/(\d+[,.]?\d*\s*[€%]|\.\d+\s*€\/[a-zéèê]+)/g,
-        '<strong style="color:var(--gold);font-weight:700;">$1</strong>');
-      const textEl = el.querySelector('.ia-line-text');
-      if (textEl) { textEl.innerHTML = formatted; }
-      else { el.innerHTML = formatted; }
-      el.classList.add('active');
-    };
-
     if (!trips.length) {
-      _setLine('ia-line-revenus',    'Enregistrez vos premières courses.');
-      _setLine('ia-line-zones',      'Analyse en attente.');
-      _setLine('ia-line-carbu',      'Analyse en attente.');
-      _setLine('ia-line-motivation', 'Commencez à conduire pour activer le coach.');
-      _setLine('ia-line-restant',    'Définissez un objectif journalier.');
-      dotEl?.classList.remove('active');
+      iaEl.textContent = 'Enregistrez vos premières courses pour recevoir votre analyse personnalisée.';
       return;
     }
 
-    const conso   = parseFloat(ls('wob_conso')) || 6.5;
-    const pCarb   = parseFloat(ls('wob_prix'))  || 1.85;
-    const vehType = ls('wob_veh_type') || 'essence';
-    const goals   = state.goals || { day:0, week:0, month:0 };
-    const h       = new Date().getHours();
-    const jour    = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
+    dotEl?.classList.add('active');
+    iaEl.textContent = '⏳ Analyse de vos courses en cours...';
 
-    // Stats
+    const conso    = parseFloat(ls('wob_conso')) || 6.5;
+    const pCarb    = parseFloat(ls('wob_prix'))  || 1.85;
+    const vehType  = ls('wob_veh_type') || 'essence';
+
+    // Stats courses
     const gains    = trips.map(t => t.gain);
-    const total    = gains.reduce((a,b) => a+b, 0);
+    const total    = gains.reduce((a, b) => a + b, 0);
     const avg      = total / trips.length;
-    const totalKm  = trips.reduce((s,t) => s+(t.km||0), 0);
-    const totalMin = trips.reduce((s,t) => s+(t.duree||0), 0);
-    const fuelCost = totalKm * (conso/100) * pCarb;
+    const best     = Math.max(...gains);
+    const worst    = Math.min(...gains);
+    const totalKm  = trips.reduce((s, t) => s + (t.km || 0), 0);
+    const totalMin = trips.reduce((s, t) => s + (t.duree || 0), 0);
+    const fuelCost = totalKm * (conso / 100) * pCarb;
     const net      = total - fuelCost;
-    const hourly   = totalMin > 0 ? (total/totalMin)*60 : 0;
-    const ratioKm  = totalKm > 0 ? total/totalKm : 0;
-    const lowRatio = trips.filter(t => t.km>0 && t.gain/t.km < 1.5).length;
-    const premium  = trips.filter(t => t.gain >= 30).length;
+    const hourly   = totalMin > 0 ? (total / totalMin) * 60 : 0;
+    const ratioKm  = totalKm > 0 ? total / totalKm : 0;
 
-    // Calcul restant objectif journalier
-    const today = new Date(); today.setHours(0,0,0,0);
-    const dayGain = trips.filter(t => t.date && new Date(t.date) >= today).reduce((s,t) => s+(t.gain||0), 0);
-    const restant = goals.day > 0 ? Math.max(0, goals.day - dayGain) : null;
-    const coursesRestantes = restant && avg > 0 ? Math.ceil(restant / avg) : null;
+    // ── Analyse avancée des courses ──────────────────
+    // Répartition par plateforme (si dispo)
+    const platDist = {};
+    trips.forEach(t => {
+      const p = t.platform || 'Inconnue';
+      if (!platDist[p]) platDist[p] = { count: 0, gain: 0, km: 0 };
+      platDist[p].count++;
+      platDist[p].gain += t.gain;
+      platDist[p].km   += t.km || 0;
+    });
+    const platSummary = Object.entries(platDist)
+      .map(([p, d]) => `${p}: ${d.count} courses, moy ${(d.gain/d.count).toFixed(2)}€, ratio ${d.km>0?(d.gain/d.km).toFixed(2):'-'}€/km`)
+      .join(' | ');
 
-    // Cache TTL 30min
-    const cacheKey = 'wod_coach_lines';
-    const cacheTs  = 'wod_coach_lines_ts';
-    const cacheTrips = 'wod_coach_lines_trips';
-    const age = Date.now() - parseInt(ls(cacheTs) || '0');
-    const cachedTrips = parseInt(ls(cacheTrips) || '0');
+    // Courses refusables : gain < 8€ OU ratio < 1.5€/km OU durée > 45min pour gain < 20€
+    const lowValue   = trips.filter(t => t.gain < 8).length;
+    const lowRatio   = trips.filter(t => t.km > 0 && t.gain / t.km < 1.5).length;
+    const longCheap  = trips.filter(t => (t.duree || 0) > 45 && t.gain < 20).length;
 
-    let lines = null;
-    if (age < 30 * 60 * 1000 && cachedTrips === trips.length) {
-      try { lines = JSON.parse(ls(cacheKey) || 'null'); } catch(e){}
+    // Courses premium : > 30€
+    const premium    = trips.filter(t => t.gain >= 30).length;
+    const premiumPct = ((premium / trips.length) * 100).toFixed(0);
+
+    // Créneau le plus rentable (€/course moyen par tranche horaire)
+    const hourRevenue = {};
+    trips.forEach(t => {
+      if (!t.date) return;
+      const h = new Date(t.date).getHours();
+      const bracket = h < 6 ? 'nuit (0-6h)' : h < 10 ? 'matin (6-10h)' : h < 14 ? 'midi (10-14h)' : h < 18 ? 'après-midi (14-18h)' : h < 22 ? 'soir (18-22h)' : 'soirée tardive (22-0h)';
+      if (!hourRevenue[bracket]) hourRevenue[bracket] = { total: 0, count: 0 };
+      hourRevenue[bracket].total += t.gain;
+      hourRevenue[bracket].count++;
+    });
+    const bestSlot = Object.entries(hourRevenue)
+      .map(([b, d]) => ({ bracket: b, avg: d.total / d.count, count: d.count }))
+      .sort((a, b) => b.avg - a.avg)[0];
+    const worstSlot = Object.entries(hourRevenue)
+      .map(([b, d]) => ({ bracket: b, avg: d.total / d.count, count: d.count }))
+      .sort((a, b) => a.avg - b.avg)[0];
+
+    // Jour de semaine le plus rentable
+    const dayNames = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
+    const dayRevenue = {};
+    trips.forEach(t => {
+      if (!t.date) return;
+      const day = dayNames[new Date(t.date).getDay()];
+      if (!dayRevenue[day]) dayRevenue[day] = { total: 0, count: 0 };
+      dayRevenue[day].total += t.gain;
+      dayRevenue[day].count++;
+    });
+    const bestDay = Object.entries(dayRevenue)
+      .map(([d, v]) => ({ day: d, avg: v.total / v.count }))
+      .sort((a, b) => b.avg - a.avg)[0];
+
+    // Durée moyenne des courses
+    const tripsWithDuration = trips.filter(t => t.duree > 0);
+    const avgDuration = tripsWithDuration.length > 0
+      ? tripsWithDuration.reduce((s, t) => s + t.duree, 0) / tripsWithDuration.length
+      : 0;
+
+    const prompt = `Tu es un expert VTC parisien spécialisé dans l'optimisation des revenus chauffeur. Ton rôle est d'analyser les données de courses réelles et de donner des conseils TRÈS CONCRETS et ACTIONNABLES pour aider le chauffeur à mieux choisir ses courses et maximiser ses gains nets.
+
+═══ DONNÉES RÉELLES DU CHAUFFEUR (${trips.length} courses) ═══
+
+PERFORMANCE GLOBALE :
+• Gains bruts : ${total.toFixed(2)}€ | Net après carburant : ${net.toFixed(2)}€
+• Moyenne/course : ${avg.toFixed(2)}€ | Meilleure : ${best.toFixed(2)}€ | Plus faible : ${worst.toFixed(2)}€
+• Distance totale : ${totalKm.toFixed(0)} km | Ratio moyen : ${ratioKm.toFixed(2)} €/km
+• Taux horaire : ${hourly.toFixed(2)} €/h | Durée moy/course : ${avgDuration.toFixed(0)} min
+• Carburant (${vehType}, ${conso}L/100km à ${pCarb}€/L) : ${fuelCost.toFixed(2)}€
+
+QUALITÉ DU PORTEFEUILLE DE COURSES :
+• Courses premium (≥30€) : ${premium}/${trips.length} (${premiumPct}%)
+• Courses peu rentables (<8€) : ${lowValue}/${trips.length}
+• Mauvais ratio (<1,5€/km) : ${lowRatio}/${trips.length}
+• Longues et bon marché (>45min, <20€) : ${longCheap}/${trips.length}
+
+CRÉNEAUX HORAIRES :
+• Meilleur créneau : ${bestSlot ? `${bestSlot.bracket} → moy ${bestSlot.avg.toFixed(2)}€/course (${bestSlot.count} courses)` : 'pas assez de données'}
+• Créneau le moins rentable : ${worstSlot ? `${worstSlot.bracket} → moy ${worstSlot.avg.toFixed(2)}€/course` : '-'}
+• Meilleur jour : ${bestDay ? `${bestDay.day} → moy ${bestDay.avg.toFixed(2)}€/course` : 'pas assez de données'}
+
+PLATEFORMES : ${platSummary || 'non renseigné'}
+
+OBJECTIFS : journalier ${state.goals?.day || 0}€ | hebdo ${state.goals?.week || 0}€ | mensuel ${state.goals?.month || 0}€
+
+═══ TA MISSION ═══
+En te basant UNIQUEMENT sur ces données réelles, donne :
+1. 🎯 UN CONSTAT PRÉCIS sur le point le plus critique (ex: trop de courses courtes peu rentables, mauvais créneaux, ratio €/km insuffisant...)
+2. ✅ DEUX RÈGLES CONCRÈTES à appliquer IMMÉDIATEMENT pour mieux choisir les courses (ex: refuser les courses X, privilégier Y, quitter la zone Z à telle heure...)
+3. 💡 UN CONSEIL sur le meilleur créneau/jour à exploiter selon ses données
+4. ⚡ UNE ACTION pour améliorer le taux horaire
+
+Sois direct, chiffré, sans blabla. Parle comme un expert VTC, pas comme un chatbot générique. Max 6 phrases.`;
+
+    try {
+      const text = await callGemini(prompt, { maxTokens: 600, temperature: 0.4 });
+      iaEl.textContent = text;
+      setLS('wob_ia', text);
+      setLS('wob_ia_last_call', String(Date.now()));
+      setLS('wob_ia_last_trips', String(trips.length));
+    } catch {
+      // Fallback local — analyse VTC sans API
+      const lines = [];
+      // Constat principal
+      if (lowRatio > trips.length * 0.3)
+        lines.push(`🎯 ${lowRatio} courses sur ${trips.length} sont sous 1,5€/km — c'est trop. Refusez systématiquement les courses < 8€ qui vous font perdre du temps moteur.`);
+      else if (hourly < 15)
+        lines.push(`⚠️ Taux horaire de ${hourly.toFixed(1)}€/h — insuffisant pour couvrir vos charges. Ciblez les courses aéroport (CDG/Orly) qui tournent entre 45€ et 80€.`);
+      else
+        lines.push(`✅ Bon taux horaire (${hourly.toFixed(1)}€/h) sur ${trips.length} courses — vous êtes dans la bonne dynamique.`);
+      // Conseil créneau
+      if (bestSlot && worstSlot && bestSlot.bracket !== worstSlot.bracket)
+        lines.push(`🕐 Votre créneau le plus rentable est ${bestSlot.bracket} (${bestSlot.avg.toFixed(2)}€/course moy) — concentrez-vous dessus et évitez ${worstSlot.bracket} (${worstSlot.avg.toFixed(2)}€/course).`);
+      // Courses premium
+      if (premium === 0)
+        lines.push(`💡 Aucune course ≥30€ détectée — activez la file d'attente CDG/Orly et les adresses affaires (La Défense, hôtels 4-5★) pour muscler votre panier moyen.`);
+      else
+        lines.push(`💡 ${premiumPct}% de courses premium (≥30€) — continuez à privilégier ces destinations.`);
+      // Carburant
+      lines.push(`⛽ Carburant : ${fuelCost.toFixed(2)}€ sur ${totalKm.toFixed(0)} km — ratio net ${ratioKm > 0 ? (net / totalKm).toFixed(2) : '—'}€/km réel. ${ratioKm < 1.8 ? 'Réduisez les km à vide en restant dans les zones demande forte.' : 'Bonne maîtrise du kilométrage.'}`);
+      iaEl.textContent = lines.join(' ');
+      setLS('wob_ia', iaEl.textContent);
+    } finally {
+      dotEl?.classList.remove('active');
+      // Projections
+      this._renderProjections(avg, trips.length);
     }
-
-    if (!lines) {
-      const prompt = `Tu es expert VTC Paris. Chauffeur ${jour} ${h}h. Données: ${trips.length} courses, brut ${total.toFixed(2)}€, net ${net.toFixed(2)}€, moy ${avg.toFixed(2)}€/course, ratio ${ratioKm.toFixed(2)}€/km, taux ${hourly.toFixed(1)}€/h, carbu ${fuelCost.toFixed(2)}€ (${conso}L/100 à ${pCarb}€), ${lowRatio} courses sous 1.5€/km, ${premium} courses premium >=30€. Objectif jour ${goals.day}€, déjà ${dayGain.toFixed(2)}€. Reponds UNIQUEMENT en JSON strict: {"revenus":"une phrase courte sur la performance revenus, chiffrée, sans emoji","zones":"une phrase sur zones/créneaux à cibler maintenant, sans emoji","carburant":"une phrase sur gestion carburant et rentabilité km, sans emoji","motivation":"une phrase motivante courte et directe, sans emoji"}`;
-
-      try {
-        const text  = await callGemini(prompt, { maxTokens: 350, temperature: 0.4 });
-        const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim();
-        const match = clean.match(/\{[\s\S]*\}/);
-        if (match) {
-          lines = JSON.parse(match[0]);
-          setLS(cacheKey,  JSON.stringify(lines));
-          setLS(cacheTs,   Date.now().toString());
-          setLS(cacheTrips, String(trips.length));
-        }
-      } catch(e) { console.warn('Coach lines Gemini:', e); }
-    }
-
-    // Fallback local
-    if (!lines) {
-      lines = {
-        revenus:    hourly >= 15
-          ? `Taux horaire de ${hourly.toFixed(1)} €/h sur ${trips.length} courses — bonne dynamique.`
-          : `Taux horaire de ${hourly.toFixed(1)} €/h — ciblez CDG/Orly (45-80€) pour augmenter le panier.`,
-        zones:      h >= 7 && h <= 9   ? 'Rush matin actif — priorité gares et zones bureaux (La Défense, Part-Dieu).'
-                  : h >= 17 && h <= 20 ? 'Rush soir — positionnez-vous centres d\'affaires et restaurants.'
-                  : h >= 22            ? 'Nuit — CDG toutes les 30 min, zones festives Grands Boulevards.'
-                  :                      'Activité modérée — restez proches des hôtels et gares principales.',
-        carburant:  `Carburant: ${fuelCost.toFixed(2)} € pour ${totalKm.toFixed(0)} km — ${ratioKm < 1.8 ? 'réduisez les trajets à vide, restez dans les zones demande forte.' : 'bonne maîtrise des kilomètres à vide.'}`,
-        motivation: trips.length < 5 ? 'Chaque course compte — construisez votre historique pour affiner l\'analyse.'
-          : premium > 0 ? `${premium} courses premium enregistrées — continuez à cibler les longues distances.`
-          : 'Concentrez-vous sur la qualité plutôt que la quantité — une bonne course vaut trois mauvaises.',
-      };
-    }
-
-    _setLine('ia-line-revenus',    lines.revenus    || '—');
-    _setLine('ia-line-zones',      lines.zones      || '—');
-    _setLine('ia-line-carbu',      lines.carburant  || '—');
-    _setLine('ia-line-motivation', lines.motivation || '—');
-
-    // Ligne restant objectif — toujours calculé localement
-    if (restant !== null && coursesRestantes !== null) {
-      _setLine('ia-line-restant', restant > 0
-        ? `Il reste ${formatEuro(restant)} à atteindre, soit environ ${coursesRestantes} course${coursesRestantes > 1 ? 's' : ''} à ${formatEuro(avg)} de moyenne.`
-        : `Objectif journalier de ${formatEuro(goals.day)} atteint — continuez à optimiser le net.`);
-    } else if (goals.day === 0) {
-      _setLine('ia-line-restant', 'Définissez un objectif journalier dans Revenus & Objectifs.');
-    }
-
-    dotEl?.classList.remove('active');
-    setLS('wob_ia', JSON.stringify(lines));
-    this._renderProjections(avg, trips.length);
   },
 
   _renderProjections(avgPerTrip, tripsCount) {
@@ -2700,22 +2393,6 @@ const HOME = {
       <div class="proj-card"><div class="proj-lbl">Projection/semaine</div><div class="proj-val">${formatEuro(projW)}</div></div>
       <div class="proj-card"><div class="proj-lbl">Projection/mois</div><div class="proj-val">${formatEuro(projM)}</div></div>`;
     if ($('stats-projections')) $('stats-projections').innerHTML = projEl.innerHTML;
-
-    // Alimenter widget Performances & Carburant (mis à jour à chaque recalcul)
-    const _conso = parseFloat(ls('wob_conso')) || 6.5;
-    const _prix  = parseFloat(ls('wob_prix'))  || 1.85;
-    const _km    = state.totalKm || 0;
-    const _mins  = state.sessions ? state.sessions.reduce((s,t) => s+(t.duree||0), 0) : 0;
-    const _gain  = state.totalGain || 0;
-    const _fuelL = _km * (_conso / 100);
-    const _fuelE = _fuelL * _prix;
-    const _hrly  = _mins > 0 ? (_gain / _mins) * 60 : 0;
-    const _ratio = _km > 0 ? _gain / _km : 0;
-    [['perf-hourly',   _hrly  > 0 ? _hrly.toFixed(1)  + ' €' : '—'],
-     ['perf-fuel-cost',_fuelE > 0 ? _fuelE.toFixed(2) + ' €' : '—'],
-     ['perf-fuel-l',   _fuelL > 0 ? _fuelL.toFixed(1) + ' L' : '—'],
-     ['perf-ratio-km', _ratio > 0 ? _ratio.toFixed(2) + ' €' : '—'],
-    ].forEach(([id, v]) => { const el = $(id); if (el) el.textContent = v; });
   },
   _renderWeekHistory() {
     const el = document.getElementById('week-history-list'); if (!el) return;
@@ -2745,21 +2422,6 @@ const HOME = {
 
 };
 window.HOME = HOME;
-
-// ══════════════════════════════════════════════════
-//  TOGGLE HISTORIQUE COURSES
-// ══════════════════════════════════════════════════
-window.toggleHistorique = function() {
-  const list = $('hist-trips-list');
-  const lbl  = $('hist-toggle-lbl');
-  const ico  = $('hist-toggle-ico');
-  if (!list) return;
-  const hidden = list.style.display === 'none';
-  list.style.display = hidden ? '' : 'none';
-  if (lbl) lbl.textContent = hidden ? 'Masquer' : 'Afficher';
-  if (ico) ico.style.transform = hidden ? '' : 'rotate(-90deg)';
-};
-
 window.generateIAReport = () => HOME.generateCoachReport();
 
 // Expose state globally for api.js
