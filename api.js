@@ -27,17 +27,10 @@ const WOB_CONFIG = {
   // ▶ Collez ici votre clé IDF Mobilités (obtenue sur prim.iledefrance-mobilites.fr)
   IDFM_KEY: 'odFJa9ooMgc5hHcNLGBAIfhMheIQZqUi',
 
-  // Supabase — sauvegarde cloud automatique
-  // ▶ Table à créer dans votre projet Supabase (SQL Editor) :
-  // CREATE TABLE IF NOT EXISTS wob_sessions (
-  //   user_id TEXT PRIMARY KEY DEFAULT 'default',
-  //   updated_at TIMESTAMPTZ DEFAULT NOW(),
-  //   total_gain TEXT, total_km TEXT, total_trips TEXT,
-  //   depenses TEXT, goals TEXT, profile_name TEXT,
-  //   veh_modele TEXT, veh_type TEXT, ia_report TEXT
-  // );
-  // ALTER TABLE wob_sessions ENABLE ROW LEVEL SECURITY;
-  // CREATE POLICY "public_access" ON wob_sessions FOR ALL USING (true) WITH CHECK (true);
+  // Navitia legacy (clé expirée — remplacée par PRIM ci-dessus)
+  NAVITIA_KEY: 'tmvRLg8J6MvXpjTFKOuqxwlIJ7oMtFtt',
+
+  // Supabase — clés intégrées
   SUPABASE_URL: 'https://ewdbcvygplepjefmpyap.supabase.co',
   SUPABASE_KEY: 'sb_publishable_p9s8AJ4KNBIEYd5vT4h3Dw_MDQjLwJY',
 
@@ -643,9 +636,9 @@ const NAVITIA = {
       disruptions = await this._fetchOpenDataIDFM();
     }
 
-    // ── SOURCE 3 : Gemini — analyse intelligente des perturbations TC ──
+    // ── SOURCE 3 : Fallback synthétique heure/jour ────────────────
     if (!disruptions) {
-      disruptions = await this._fetchGeminiDisruptions();
+      disruptions = this._buildSyntheticDisruptions();
     }
 
     setCache('wob_navitia', disruptions);
@@ -814,51 +807,15 @@ const NAVITIA = {
     return { alerts: unique, ts: Date.now(), _source: 'opendata' };
   },
 
-  async _fetchGeminiDisruptions() {
-    // Gemini analyse l'heure/jour et génère une analyse TC intelligente
-    // Cache 30min — bien meilleur que le fallback statique heure de pointe
-    try {
-      const h    = new Date().getHours();
-      const d    = new Date().getDay();
-      const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][d];
-      const date = new Date().toISOString().split('T')[0];
-
-      if (typeof callGemini !== 'function') throw new Error('callGemini non défini');
-
-      const prompt = [
-        'Tu es expert réseau RATP/SNCF Paris. Nous sommes ' + jour + ' ' + date + ' a ' + h + 'h.',
-        'Y a-t-il des perturbations connues ou travaux programmés sur RER A, RER B, RER C, RER D, Metro 13, Metro 4, Metro 1 ?',
-        'Tiens compte : travaux nuit (apres 22h), travaux week-end habituels, horaires de pointe (7h-9h, 17h-20h).',
-        'Si réseau normal dis-le clairement.',
-        'JSON strict uniquement :',
-        '{"alerts":[{"line":"RER A","icon":"🔴","msg":"description","isMajor":true,"impact":"high"}],"summary":"etat global"}',
-        'Si aucune perturbation : {"alerts":[],"summary":"Réseau normal"}',
-      ].join(' ');
-
-      const text  = await callGemini(prompt, { maxTokens: 350, temperature: 0.2 });
-      const clean = text.replace(/```json|```/g, '').trim();
-      const match = clean.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error('JSON introuvable');
-      const data  = JSON.parse(match[0]);
-
-      const alerts = (data.alerts || []).map(a => ({
-        line: a.line || '', icon: a.icon || '🚇',
-        impact: a.impact || 'medium', isMajor: !!a.isMajor,
-        msg: (a.msg || '').slice(0, 150),
-        zones: this.DISRUPTION_ZONES?.[a.line] || [],
-        _source: 'gemini',
-      }));
-
-      LOG('Gemini TC OK:', alerts.length, 'alertes');
-      return { alerts, summary: data.summary || '', ts: Date.now(), _source: 'gemini' };
-
-    } catch(e) {
-      ERR('Gemini TC:', e.message);
-      // Fallback minimal — juste heure de pointe, sans message inscription
-      const h = new Date().getHours(), d = new Date().getDay();
-      const isRush = (d >= 1 && d <= 5) && ((h >= 7 && h <= 9) || (h >= 17 && h <= 20));
-      return { alerts: [], ts: Date.now(), _synthetic: true, _rush: isRush };
-    }
+  _buildSyntheticDisruptions() {
+    const h = new Date().getHours(), d = new Date().getDay();
+    const isRush = (d >= 1 && d <= 5) && ((h >= 7 && h <= 9) || (h >= 17 && h <= 20));
+    return {
+      alerts: [],
+      ts: Date.now(),
+      _synthetic: true,
+      _rush: isRush,
+    };
   },
 
   parseDisruptions(disruptions) {
@@ -904,27 +861,49 @@ const NAVITIA = {
     const cont = el('navitia-container'); if (!cont) return;
     const alerts = data.alerts || [];
 
-    // Fallback synthétique — heure de pointe sans données externes
+    // Affichage selon la source des données
     if (data._synthetic) {
       const h = new Date().getHours(), d = new Date().getDay();
       const isRush = (d >= 1 && d <= 5) && ((h >= 7 && h <= 9) || (h >= 17 && h <= 20));
-      cont.innerHTML =
-        '<div class="list-item ' + (isRush ? 'warn' : 'ok') + '" style="border-radius:10px;font-weight:700;">' +
-        (isRush ? '⚠️ Heure de pointe — Positionnez-vous près des grandes gares' : '✅ Circulation normale estimée sur le réseau TC') +
-        '</div>';
+      // Donner un conseil actionnable même sans données temps réel
+      const rushTip = isRush
+        ? '⚠️ Heure de pointe détectée — Positionnez-vous près des grandes gares'
+        : '✅ Circulation normale estimée sur le réseau TC';
+      cont.innerHTML = `
+        <div class="list-item ${isRush ? 'warn' : 'ok'}" style="border-radius:10px;font-weight:700;">
+          ${rushTip}
+        </div>
+        <div style="background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px;margin-top:8px;">
+          <div style="font-size:11px;font-weight:700;color:var(--gold);margin-bottom:6px;">📡 Activer les alertes temps réel</div>
+          <div style="font-size:10px;color:var(--text-dim);line-height:1.6;">
+            Inscrivez-vous gratuitement sur
+            <strong style="color:var(--text)">prim.iledefrance-mobilites.fr</strong>
+            et collez votre clé dans <code style="background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;">IDFM_KEY</code> dans <code>api.js</code>
+            pour recevoir les pannes RER/Métro en temps réel.
+          </div>
+        </div>`;
       return;
     }
 
-    // Aucune perturbation — afficher summary Gemini si dispo
+    // Source connue mais 0 perturbation = réseau nominal
+    if (!alerts.length && (data._source === 'prim_ok' || data._source === 'opendata_ok')) {
+      cont.innerHTML = `
+        <div class="list-item ok" style="border-radius:10px;font-weight:700;">
+          ✅ Réseau transports en commun — Aucune perturbation
+        </div>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">
+          ${data._source === 'prim' || data._source === 'prim_ok' ? '📡 Source : PRIM IDFM temps réel' : '📡 Source : Open Data IDFM'}
+          · ${new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}
+        </div>`;
+      return;
+    }
+
     if (!alerts.length) {
-      const srcLabel = (data._source === 'prim' || data._source === 'prim_ok') ? '📡 PRIM IDFM temps réel'
-        : data._source === 'gemini' ? '🤖 Analyse Gemini'
-        : '📡 Open Data IDFM';
-      const summary = data.summary || 'Aucune perturbation sur les lignes surveillées';
-      cont.innerHTML =
-        '<div class="list-item ok" style="border-radius:10px;font-weight:700;">✅ ' + summary + '</div>' +
-        '<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">' + srcLabel +
-        ' · ' + new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) + '</div>';
+      cont.innerHTML = `
+        <div class="list-item ok" style="border-radius:10px;font-weight:700;">
+          ✅ Réseau transports en commun — Trafic normal
+        </div>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">RER A/B/C/D · Métro surveillés · ${new Date(data.ts).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</div>`;
       return;
     }
 
@@ -1573,7 +1552,41 @@ function injectContainers() {
     trafficCard ? trafficCard.after(d) : rushScroll.prepend(d);
   }
 
-  // 5. IA Zones (page home)
+  // 4. Carburant
+  if (!el('carbu-container')) {
+    const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
+    d.innerHTML = `
+      <div class="card-row-hd" style="margin-bottom:10px;">
+        <span class="card-title">⛽ Prix Carburant — Autour de vous</span>
+        <button class="btn-ghost-sm" onclick="CARBURANT.load(window.state?.pos?.lat||48.8566,window.state?.pos?.lon||2.3522)">⟳</button>
+      </div>
+      <div id="carbu-container"><div class="list-item info">⏳ Chargement...</div></div>`;
+    rushScroll.append(d);
+  }
+
+  // 5. Vols ADP (remplace AviationStack)
+  if (!el('flights-cdg')) {
+    const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
+    d.innerHTML = `
+      <div style="margin-bottom:10px;">
+        <div class="card-row-hd">
+          <span class="card-title">✈️ Vols en temps réel <span style="font-size:9px;color:var(--text-dim);">Open Data ADP</span></span>
+          <div style="display:flex;gap:6px;">
+            <button class="ef-btn active" onclick="selectAirport('CDG',this)">CDG</button>
+            <button class="ef-btn" onclick="selectAirport('ORY',this)">Orly</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:8px;">
+          <button class="ef-btn active" onclick="selectFlightType('arr',this)" id="ft-arr">Arrivées</button>
+          <button class="ef-btn" onclick="selectFlightType('dep',this)" id="ft-dep">Départs</button>
+        </div>
+      </div>
+      <div id="flights-cdg"></div>
+      <div id="flights-ory" style="display:none;"></div>`;
+    rushScroll.append(d);
+  }
+
+  // 6. IA Zones (page home)
   const homeScroll = document.querySelector('#screen-home .screen-scroll');
   if (homeScroll && !el('ia-zones-container')) {
     const iaCard = homeScroll.querySelector('.ia-coach-card, .ia-card');
@@ -1638,6 +1651,23 @@ function initAPIs() {
   // Charger météo immédiatement (sans limite)
   METEO.load(defaultPos.lat, defaultPos.lon);
 
+  // Attendre GPS puis charger carburant et trafic TomTom
+  let _carbuLoaded = false, _gpsWaitCount = 0;
+  const _gpsWait = setInterval(() => {
+    _gpsWaitCount++;
+    const s = window.state;
+    const ready = s?.gpsReady && Math.abs(s.pos.lat - 48.8566) > 0.002;
+    if (ready || _gpsWaitCount >= 20) {
+      clearInterval(_gpsWait);
+      const pos = ready ? s.pos : defaultPos;
+      if (!_carbuLoaded) {
+        _carbuLoaded = true;
+        CARBURANT.load(pos.lat, pos.lon);
+        if (ready) METEO.load(pos.lat, pos.lon);
+      }
+    }
+  }, 400);
+
   // Trafic (TomTom + Sytadin) — 1 chargement initial
   setTimeout(() => TRAFFIC.load(), 1000);
 
@@ -1663,6 +1693,12 @@ function initAPIs() {
     METEO.load(p.lat, p.lon);
   }, WOB_CONFIG.REFRESH.meteo);
 
+  // Carburant: 1h (sans limite)
+  setInterval(() => {
+    const p = window.state?.pos || defaultPos;
+    CARBURANT.load(p.lat, p.lon);
+  }, WOB_CONFIG.REFRESH.carbu);
+
   // Trafic: 20min (TomTom ~72 req/jour sur 2500 dispo)
   setInterval(() => TRAFFIC.load(), WOB_CONFIG.REFRESH.traffic);
 
@@ -1685,6 +1721,7 @@ function initAPIs() {
     if (s?.gpsReady && Math.abs(s.pos.lat - _lastGpsLat) > 0.01) {
       _lastGpsLat = s.pos.lat;
       METEO.load(s.pos.lat, s.pos.lon);
+      CARBURANT.load(s.pos.lat, s.pos.lon);
       // TomTom: seulement si le cache est expiré (pour éviter de consommer les 2500 req)
       const trafficCacheAge = Date.now() - parseInt(LS.get('wob_tomtom_flow_ts') || '0');
       if (trafficCacheAge > WOB_CONFIG.CACHE_TTL.traffic) TRAFFIC.load();
