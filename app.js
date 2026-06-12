@@ -1199,7 +1199,7 @@ Réponds UNIQUEMENT en JSON valide, rien d'autre :
       ls(this.CACHE_KEY, html);
       ls(this.CACHE_TS, String(Date.now()));
       listEl.innerHTML = html;
-      if (badge) badge.textContent = 'à l'instant';
+      if (badge) badge.textContent = "à l'instant";
 
     } catch(e) {
       console.warn('[IA_EVENTS] Erreur:', e.message);
