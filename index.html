@@ -190,26 +190,34 @@
             </div>
             <span class="glass-card-title">Performances & Carburant</span>
           </div>
-          <div class="metrics-row" style="margin-top:4px;">
-            <div class="mtile">
-              <svg class="mtile-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              <span class="mtile-val" id="perf-hourly">—</span>
-              <span class="mtile-lbl">€/heure</span>
+          <div class="perf-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+            <div class="perf-tile">
+              <div class="perf-tile-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              </div>
+              <span class="perf-tile-val" id="perf-hourly">—</span>
+              <span class="perf-tile-lbl">€ / HEURE</span>
             </div>
-            <div class="mtile">
-              <svg class="mtile-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 22V8l9-6 9 6v14"/><path d="M9 22V12h6v10"/></svg>
-              <span class="mtile-val" id="perf-fuel-cost">—</span>
-              <span class="mtile-lbl">Carburant €</span>
+            <div class="perf-tile">
+              <div class="perf-tile-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 22V8l9-6 9 6v14"/><path d="M9 22V12h6v10"/></svg>
+              </div>
+              <span class="perf-tile-val" id="perf-fuel-cost">—</span>
+              <span class="perf-tile-lbl">CARBURANT €</span>
             </div>
-            <div class="mtile">
-              <svg class="mtile-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-              <span class="mtile-val" id="perf-fuel-l">—</span>
-              <span class="mtile-lbl">Litres est.</span>
+            <div class="perf-tile">
+              <div class="perf-tile-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              </div>
+              <span class="perf-tile-val" id="perf-fuel-l">—</span>
+              <span class="perf-tile-lbl">LITRES EST.</span>
             </div>
-            <div class="mtile">
-              <svg class="mtile-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/></svg>
-              <span class="mtile-val" id="perf-ratio-km">—</span>
-              <span class="mtile-lbl">€/km</span>
+            <div class="perf-tile">
+              <div class="perf-tile-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/></svg>
+              </div>
+              <span class="perf-tile-val" id="perf-ratio-km">—</span>
+              <span class="perf-tile-lbl">€ / KM</span>
             </div>
           </div>
           <div id="ia-projections" class="proj-row" style="margin-top:10px;"></div>
@@ -340,24 +348,19 @@
           <div id="navitia-container"><div class="list-item info">Chargement alertes TC...</div></div>
         </div>
 
-        <!-- 6. ÉVÉNEMENTS PARIS IA (Gemini, cache 24h) -->
+        <!-- 6. IA ÉVÉNEMENTS PARIS — Gemini, cache 24h -->
         <div class="glass-card">
           <div class="glass-card-hd">
             <div class="glass-card-icon gold-icon">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/></svg>
             </div>
-            <span class="glass-card-title">Événements Paris</span>
-            <button class="btn-ghost-sm" onclick="loadEvents(true)">
+            <span class="glass-card-title">IA Événements Paris</span>
+            <span id="ia-events-cache-badge" style="font-size:10px;color:var(--text-dim);margin-left:4px;"></span>
+            <button class="btn-ghost-sm" onclick="IA_EVENTS.load(true)" style="margin-left:auto">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.93"/></svg>
             </button>
           </div>
-          <div class="ef-row">
-            <button class="ef-btn active" onclick="filterEvents('all',this)">Tous</button>
-            <button class="ef-btn" onclick="filterEvents('fort',this)">Fort</button>
-            <button class="ef-btn" onclick="filterEvents('mod',this)">Modéré</button>
-            <button class="ef-btn" onclick="filterEvents('faible',this)">Faible</button>
-          </div>
-          <div id="events-list" class="dyn-list"><div class="list-item info">Chargement...</div></div>
+          <div id="ia-events-list" class="dyn-list"><div class="list-item info">Analyse en cours...</div></div>
         </div>
 
         <!-- 7. VOLS EN TEMPS RÉEL -->

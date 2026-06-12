@@ -432,7 +432,7 @@ function initApp() {
   initMap();
   renderRushChart();
   loadTraffic();
-  loadEvents(false);
+  setTimeout(() => IA_EVENTS.load(false), 2000);
   initDocForm();
   checkAlerts();
   scheduleAutoBackup();
@@ -1147,186 +1147,97 @@ async function fetchRoute(zone) {
   } catch { return null; }
 }
 
-window.loadEvents = async function(forceRefresh) {
-  const el = $('events-list');
-  if (!el) return;
+// ══════════════════════════════════════════════════
+//  IA ÉVÉNEMENTS PARIS — Gemini, cache 24h
+// ══════════════════════════════════════════════════
+const IA_EVENTS = {
+  CACHE_KEY: 'wod_ia_events',
+  CACHE_TS:  'wod_ia_events_ts',
+  CACHE_TTL: 24 * 60 * 60 * 1000, // 24 heures
 
-  const cache    = ls('wob_events');
-  const cacheTs  = parseInt(ls('wob_events_ts') || '0');
-  const cacheAge = Date.now() - cacheTs;
-  const CACHE_MAX = 24 * 60 * 60 * 1000; // 24h — actualisation quotidienne
+  async load(forceRefresh = false) {
+    const listEl = $('ia-events-list');
+    const badge  = $('ia-events-cache-badge');
+    if (!listEl) return;
 
-  if (!forceRefresh && cache && cacheAge < CACHE_MAX) {
-    renderEvents(JSON.parse(cache));
-    return;
-  }
+    const cache   = ls(this.CACHE_KEY);
+    const cacheTs = parseInt(ls(this.CACHE_TS) || '0');
+    const age     = Date.now() - cacheTs;
+    const ageH    = Math.round(age / 3600000);
 
-  el.innerHTML = `<div class="list-item info">🤖 Analyse des événements en cours...</div>`;
+    // Servir le cache si valide et pas de forceRefresh
+    if (!forceRefresh && cache && age < this.CACHE_TTL) {
+      listEl.innerHTML = cache;
+      if (badge) badge.textContent = `cache ${ageH}h`;
+      return;
+    }
 
-  try {
-    const today = new Date().toISOString().split('T')[0];
-    let results = null;
+    listEl.innerHTML = '<div class="list-item info">🤖 Gemini analyse les événements Paris...</div>';
+    if (badge) badge.textContent = '';
 
-    // ── SOURCE 1 : Gemini (principal) — direct, CORS natif, pas de proxy ──
-    // Gemini connaît les grands événements parisiens et génère une liste fiable
-    // On l'utilise EN PREMIER car les proxies publics sont instables
     try {
-      const h    = new Date().getHours();
-      const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][new Date().getDay()];
-      const prompt = 'Tu es un expert VTC parisien. Nous sommes ' + jour + ' ' + today + ' a ' + h + 'h. Liste 6 evenements REELS ou tres probables a Paris dans les 7 prochains jours creant de la demande VTC (concerts Bercy/AccorArenas, matchs PSG, salons Porte de Versailles, expos, manifestations, festivals...). Sois precis sur les lieux et dates. Reponds UNIQUEMENT en JSON valide, rien d autre : [{"title":"...","date_start":"YYYY-MM-DD","address_name":"lieu exact Paris","address_zipcode":"75XXX","tags":"type evenement","impact":"fort|modere|faible"}]';
-      const text = await callGemini(prompt, { maxTokens: 600, temperature: 0.3 });
-      const clean = text.replace(/```json|```/g, '').trim();
-      const jsonMatch = clean.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) throw new Error('JSON introuvable');
-      const evts = JSON.parse(jsonMatch[0]);
-      if (evts?.length >= 1) {
-        results = evts;
-        console.log('[Events] Gemini principal OK:', results.length);
-      }
-    } catch(eg) { console.warn('[Events] Gemini principal:', eg.message); }
+      const now  = new Date();
+      const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][now.getDay()];
+      const dateStr = now.toISOString().split('T')[0];
+      const h = now.getHours();
 
-    // ── SOURCE 2 : que-faire-a-paris via proxy (fallback si Gemini KO) ──
-    if (!results) {
-      const QF_TARGET = 'https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/que-faire-a-paris-/records'
-        + '?where=' + encodeURIComponent("date_start >= date'" + today + "'")
-        + '&order_by=date_start&limit=20&select=title,date_start,address_name,address_zipcode,tags,url';
-      for (const proxy of [
-        'https://api.allorigins.win/raw?url=' + encodeURIComponent(QF_TARGET),
-        'https://corsproxy.io/?' + encodeURIComponent(QF_TARGET),
-      ]) {
-        if (results) break;
-        try {
-          const ctrl = new AbortController();
-          const t = setTimeout(() => ctrl.abort(), 8000);
-          const r = await fetch(proxy, { signal: ctrl.signal });
-          clearTimeout(t);
-          if (!r.ok) continue;
-          const text = await r.text();
-          let parsed; try { parsed = JSON.parse(text); } catch(e) { continue; }
-          const raw = parsed.contents ? JSON.parse(parsed.contents) : parsed;
-          if (raw.results?.length >= 1) { results = raw.results; console.log('[Events] QFP proxy OK:', results.length); }
-        } catch(e) { console.warn('[Events] QFP proxy:', e.message); }
+      const prompt = `Tu es un expert VTC parisien. Nous sommes ${jour} ${dateStr} à ${h}h.
+Liste 7 événements RÉELS ou très probables à Paris dans les 48 prochaines heures créant de la demande VTC premium.
+Inclus : concerts Bercy/AccorArenas, matchs PSG/Roland Garros, salons Porte de Versailles, grands événements culturels, manifestations connues.
+Pour chaque événement donne un conseil de positionnement VTC court et précis.
+Réponds UNIQUEMENT en JSON valide, rien d'autre :
+[{"titre":"...","lieu":"lieu exact Paris","date":"YYYY-MM-DD HH:mm","impact":"fort|modere|faible","conseil":"conseil 8 mots max","zone":"arrondissement ou quartier"}]`;
+
+      const text = await callGemini(prompt, { maxTokens: 800, temperature: 0.2 });
+      const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim();
+      const match = clean.match(/\[[\s\S]*\]/);
+      if (!match) throw new Error('JSON introuvable');
+      const events = JSON.parse(match[0]);
+      if (!events?.length) throw new Error('Liste vide');
+
+      const html = this._render(events);
+      ls(this.CACHE_KEY, html);
+      ls(this.CACHE_TS, String(Date.now()));
+      listEl.innerHTML = html;
+      if (badge) badge.textContent = 'à l'instant';
+
+    } catch(e) {
+      console.warn('[IA_EVENTS] Erreur:', e.message);
+      const cached = ls(this.CACHE_KEY);
+      if (cached) {
+        listEl.innerHTML = cached;
+        if (badge) badge.textContent = `cache ${ageH}h`;
+        listEl.insertAdjacentHTML('afterbegin',
+          `<div class="list-item warn" style="font-size:11px;margin-bottom:6px;">⚠️ Réseau indisponible — données en cache</div>`);
+      } else {
+        listEl.innerHTML = '<div class="list-item warn">⚠️ Gemini indisponible — réessayez dans quelques secondes</div>';
       }
     }
+  },
 
-    if (!results) throw new Error('Toutes les sources événements indisponibles');
-
-    const sorted = results
-      .map(ev => ({ ...ev, _impact: getEventImpact(ev) }))
-      .sort((a, b) => b._impact.score - a._impact.score);
-
-    ls('wob_events', JSON.stringify(sorted));
-    ls('wob_events_ts', Date.now().toString());
-    renderEvents(sorted);
-
-  } catch(e) {
-    console.warn('[Events] Toutes sources échouées:', e.message);
-    const cache2 = ls('wob_events');
-    if (cache2) {
-      const ageH = Math.round(cacheAge / 3600000);
-      renderEvents(JSON.parse(cache2));
-      el.insertAdjacentHTML('afterbegin',
-        `<div class="list-item warn" style="font-size:11px;border-radius:8px;margin-bottom:8px;">📡 Cache (${ageH}h) — Actualisez pour les derniers événements</div>`);
-    } else {
-      renderEventsFallback(el);
-    }
+  _render(events) {
+    const clsMap = { 'fort':'danger', 'modere':'warn', 'faible':'info' };
+    const impMap = { 'fort':'🔴 Fort impact VTC', 'modere':'🟡 Impact modéré', 'faible':'🟢 Faible impact' };
+    return events.map(ev => {
+      const cls = clsMap[ev.impact] || 'info';
+      const imp = impMap[ev.impact] || '';
+      const dateLabel = ev.date
+        ? (() => { try { return new Date(ev.date).toLocaleString('fr-FR',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}); } catch { return ev.date; } })()
+        : '';
+      return `<div class="list-item ${cls}" style="flex-direction:column;display:flex;gap:3px;padding:10px 12px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
+          <span style="font-weight:700;font-size:.82rem;flex:1;line-height:1.3">${ev.titre || 'Événement'}</span>
+          <span style="font-size:.68rem;font-weight:700;white-space:nowrap;opacity:.8">${imp}</span>
+        </div>
+        ${dateLabel ? `<span style="font-size:.72rem;opacity:.8">📅 ${dateLabel}</span>` : ''}
+        ${ev.lieu  ? `<span style="font-size:.7rem;opacity:.75">📍 ${ev.lieu}${ev.zone ? ' · ' + ev.zone : ''}</span>` : ''}
+        ${ev.conseil ? `<span style="font-size:.72rem;font-weight:700;color:var(--gold);margin-top:2px">💡 ${ev.conseil}</span>` : ''}
+      </div>`;
+    }).join('');
   }
 };
+window.IA_EVENTS = IA_EVENTS;
 
-
-function getEventImpact(ev) {
-  const txt = ((ev.title||'')+(ev.tags||'')+(ev.address_name||'')).toLowerCase();
-  if (txt.match(/stade de france|bercy|accor arena|grand palais|parc des princes/))
-    return { label:'Très fort impact', cls:'danger', score:3 };
-  if (txt.match(/concert|festival|salon|finale|grand prix|marathon/))
-    return { label:'Fort impact', cls:'warn', score:2 };
-  if (txt.match(/theatre|spectacle|exposition|cinema|marché/))
-    return { label:'Impact modéré', cls:'info', score:1 };
-  return { label:'Faible impact', cls:'ok', score:0 };
-}
-
-function renderEvents(events) {
-  const el = $('events-list');
-  if (!el) return;
-  el.innerHTML = events.map(ev => {
-    const imp  = ev._impact;
-    const date = ev.date_start
-      ? new Date(ev.date_start).toLocaleDateString('fr-FR',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})
-      : '—';
-    const lieu = ev.address_name ? `${ev.address_name}${ev.address_zipcode?` (${ev.address_zipcode})`:''}` : '';
-    const lien = ev.url ? `<a href="${ev.url}" target="_blank" style="color:var(--gold);font-size:.68rem;font-weight:700;text-decoration:none">Voir →</a>` : '';
-    return `<div class="list-item ${imp.cls}" data-impact="${imp.score}" style="flex-direction:column;display:flex;gap:2px">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
-        <span style="font-weight:700;font-size:.8rem;flex:1">${ev.title||'Événement'}</span>
-        ${lien}
-      </div>
-      <span style="font-size:.7rem;opacity:.85">${date}</span>
-      ${lieu ? `<span style="font-size:.68rem;opacity:.7">${lieu}</span>` : ''}
-      <span style="font-size:.68rem;font-weight:700">${imp.label}</span>
-    </div>`;
-  }).join('');
-}
-
-function renderEventsFallback(el) {
-  const now  = new Date();
-  const h    = now.getHours();
-  const jour = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'][now.getDay()];
-  const date = now.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' });
-
-  el.innerHTML = '<div class="list-item info" style="font-size:11px;">🤖 Analyse des événements probables...</div>';
-
-  const cacheKey = 'wob_events_fallback';
-  const cacheTs  = 'wob_events_fallback_ts';
-  const age = Date.now() - parseInt(ls(cacheTs) || '0', 10);
-  if (age < 60 * 60 * 1000) {
-    const cached = ls(cacheKey);
-    if (cached) { el.innerHTML = cached; return; }
-  }
-
-  const prompt = `Tu es un expert VTC parisien. Nous sommes ${jour} ${date} a ${h}h. Liste 3 evenements ou flux de voyageurs PROBABLES aujourd hui a Paris qui creent de la demande VTC. Pour chaque evenement donne : titre court, zone Paris concernee, niveau d impact (fort/modere/faible), conseil de positionnement en 5 mots max. Reponds en JSON strict : [{"titre":"...","zone":"...","impact":"fort|modere|faible","conseil":"..."}] Rien d autre que le JSON.`;
-
-  callGemini(prompt, { maxTokens: 400, temperature: 0.5 })
-    .then(text => {
-      let events;
-      try {
-        const clean = text.replace(/```json|```/g, '').trim();
-        const match = clean.match(/\[[\s\S]*\]/);
-        events = match ? JSON.parse(match[0]) : null;
-      } catch(e) { events = null; }
-
-      if (!events || !events.length) {
-        el.innerHTML = '<div class="list-item warn" style="font-size:11px;">⚠️ API Paris indisponible · Appuyez sur 🔄 pour réessayer</div>';
-        return;
-      }
-
-      const clsMap = { 'fort': 'danger', 'modere': 'warn', 'faible': 'info' };
-      const html = events.map(ev =>
-        '<div class="list-item ' + (clsMap[ev.impact] || 'info') + '" style="flex-direction:column;gap:2px;">' +
-        '<span style="font-weight:700;font-size:.8rem;">🤖 ' + ev.titre + '</span>' +
-        '<span style="font-size:.7rem;opacity:.85">📍 ' + ev.zone + '</span>' +
-        '<span style="font-size:.68rem;font-weight:700;color:var(--gold);">' + ev.conseil + '</span>' +
-        '</div>'
-      ).join('');
-      el.innerHTML = html;
-      setLS(cacheKey, html);
-      setLS(cacheTs, String(Date.now()));
-    })
-    .catch(() => {
-      el.innerHTML = '<div class="list-item warn" style="font-size:11px;">⚠️ API Paris indisponible · Appuyez sur 🔄 pour réessayer</div>';
-    });
-}
-
-window.filterEvents = function(type, btn) {
-  qsa('.ef-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  qsa('#events-list .list-item').forEach(item => {
-    const score = parseInt(item.dataset.impact || '0');
-    if (type==='all')    item.style.display='';
-    else if (type==='fort')  item.style.display = score>=2 ? '' : 'none';
-    else if (type==='mod')   item.style.display = score===1 ? '' : 'none';
-    else if (type==='faible') item.style.display = score===0 ? '' : 'none';
-  });
-};
 
 // ══════════════════════════════════════════════════
 //  POI

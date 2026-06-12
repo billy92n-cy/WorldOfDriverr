@@ -1573,41 +1573,7 @@ function injectContainers() {
     trafficCard ? trafficCard.after(d) : rushScroll.prepend(d);
   }
 
-  // 4. Carburant
-  if (!el('carbu-container')) {
-    const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
-    d.innerHTML = `
-      <div class="card-row-hd" style="margin-bottom:10px;">
-        <span class="card-title">⛽ Prix Carburant — Autour de vous</span>
-        <button class="btn-ghost-sm" onclick="CARBURANT.load(window.state?.pos?.lat||48.8566,window.state?.pos?.lon||2.3522)">⟳</button>
-      </div>
-      <div id="carbu-container"><div class="list-item info">⏳ Chargement...</div></div>`;
-    rushScroll.append(d);
-  }
-
-  // 5. Vols ADP (remplace AviationStack)
-  if (!el('flights-cdg')) {
-    const d = document.createElement('div'); d.className = 'card'; d.style.marginBottom = '12px';
-    d.innerHTML = `
-      <div style="margin-bottom:10px;">
-        <div class="card-row-hd">
-          <span class="card-title">✈️ Vols en temps réel <span style="font-size:9px;color:var(--text-dim);">Open Data ADP</span></span>
-          <div style="display:flex;gap:6px;">
-            <button class="ef-btn active" onclick="selectAirport('CDG',this)">CDG</button>
-            <button class="ef-btn" onclick="selectAirport('ORY',this)">Orly</button>
-          </div>
-        </div>
-        <div style="display:flex;gap:6px;margin-top:8px;">
-          <button class="ef-btn active" onclick="selectFlightType('arr',this)" id="ft-arr">Arrivées</button>
-          <button class="ef-btn" onclick="selectFlightType('dep',this)" id="ft-dep">Départs</button>
-        </div>
-      </div>
-      <div id="flights-cdg"></div>
-      <div id="flights-ory" style="display:none;"></div>`;
-    rushScroll.append(d);
-  }
-
-  // 6. IA Zones (page home)
+  // 5. IA Zones (page home)
   const homeScroll = document.querySelector('#screen-home .screen-scroll');
   if (homeScroll && !el('ia-zones-container')) {
     const iaCard = homeScroll.querySelector('.ia-coach-card, .ia-card');
@@ -1672,23 +1638,6 @@ function initAPIs() {
   // Charger météo immédiatement (sans limite)
   METEO.load(defaultPos.lat, defaultPos.lon);
 
-  // Attendre GPS puis charger carburant et trafic TomTom
-  let _carbuLoaded = false, _gpsWaitCount = 0;
-  const _gpsWait = setInterval(() => {
-    _gpsWaitCount++;
-    const s = window.state;
-    const ready = s?.gpsReady && Math.abs(s.pos.lat - 48.8566) > 0.002;
-    if (ready || _gpsWaitCount >= 20) {
-      clearInterval(_gpsWait);
-      const pos = ready ? s.pos : defaultPos;
-      if (!_carbuLoaded) {
-        _carbuLoaded = true;
-        CARBURANT.load(pos.lat, pos.lon);
-        if (ready) METEO.load(pos.lat, pos.lon);
-      }
-    }
-  }, 400);
-
   // Trafic (TomTom + Sytadin) — 1 chargement initial
   setTimeout(() => TRAFFIC.load(), 1000);
 
@@ -1714,12 +1663,6 @@ function initAPIs() {
     METEO.load(p.lat, p.lon);
   }, WOB_CONFIG.REFRESH.meteo);
 
-  // Carburant: 1h (sans limite)
-  setInterval(() => {
-    const p = window.state?.pos || defaultPos;
-    CARBURANT.load(p.lat, p.lon);
-  }, WOB_CONFIG.REFRESH.carbu);
-
   // Trafic: 20min (TomTom ~72 req/jour sur 2500 dispo)
   setInterval(() => TRAFFIC.load(), WOB_CONFIG.REFRESH.traffic);
 
@@ -1742,7 +1685,6 @@ function initAPIs() {
     if (s?.gpsReady && Math.abs(s.pos.lat - _lastGpsLat) > 0.01) {
       _lastGpsLat = s.pos.lat;
       METEO.load(s.pos.lat, s.pos.lon);
-      CARBURANT.load(s.pos.lat, s.pos.lon);
       // TomTom: seulement si le cache est expiré (pour éviter de consommer les 2500 req)
       const trafficCacheAge = Date.now() - parseInt(LS.get('wob_tomtom_flow_ts') || '0');
       if (trafficCacheAge > WOB_CONFIG.CACHE_TTL.traffic) TRAFFIC.load();

@@ -1011,3 +1011,26 @@ select.fi { -webkit-appearance:none; }
   font-size: .78rem; line-height: 1.55; color: var(--text2);
 }
 .ia-line.active .ia-line-text { color: var(--text); }
+
+/* ── Widget Performances & Carburant — grille 2x2 ── */
+.perf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.perf-tile {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 14px 10px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 14px;
+  text-align: center;
+  transition: background .2s;
+}
+.perf-tile:active { background: rgba(212,168,67,.08); }
+.perf-tile-ico { width: 22px; height: 22px; color: var(--gold); opacity: .65; }
+.perf-tile-ico svg { width: 100%; height: 100%; }
+.perf-tile-val {
+  font-family: 'Cinzel', serif; font-size: 1.15rem; font-weight: 700;
+  color: var(--text); line-height: 1;
+}
+.perf-tile-lbl {
+  font-size: .52rem; color: var(--text2);
+  text-transform: uppercase; letter-spacing: .08em;
+}
