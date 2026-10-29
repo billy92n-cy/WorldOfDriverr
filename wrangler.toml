@@ -1,0 +1,7 @@
+name = "mass-coach"
+main = "worker.mjs"
+compatibility_date = "2026-01-01"
+[vars]
+ALLOWED_ORIGIN = "https://TON-SITE.example"   # origine exacte de la PWA, sans « / » final
+GEMINI_MODEL = "gemini-2.5-flash"             # vérifie le modèle et ses quotas dans la doc Google
+HOURLY_LIMIT = "40"                           # requêtes/heure/IP (approximatif, par instance)
