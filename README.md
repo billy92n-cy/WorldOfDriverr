@@ -1,6 +1,14 @@
 # TRY AGAIN – coach de prise de masse (PWA)
 
-## Nouveautés de cette version
+## Mise à jour 2 (retours utilisateur)
+- **Espacement, couleurs, vie** (`ui.css`) : marges plus larges, titres colorés par onglet (Séance orange, Nutrition vert, Progrès bleu, Coach violet), barres de macros colorées (protéines, glucides, lipides, fibres, eau).
+- **Choix des exercices** (`ui.js`) : 44 exercices (26 ajoutés), 13 séances prêtes (salle et maison), composeur « Choisir mes exercices » filtré par muscle et matériel, et en séance les boutons « Changer » et « + Ajouter un exercice ». Les dessins de personnages ont été retirés : à défaut d'image, la fiche affiche les muscles ciblés.
+- **Recettes** : 58 recettes (petits-déjeuners, 10 shakers, plats, collations, desserts) avec macros, ingrédients, portions ×0,75 / ×1 / ×1,5, favoris et recherche. 33 aliments ajoutés (valeurs moyennes indicatives).
+- **Scanner / photo** : boutons et lignes d'analyse ne débordent plus (retour à la ligne).
+- **Coach** : bandeau de 3 indicateurs, questions rapides, conversation, analyse en cartes, réglages repliables.
+- Non fait : refonte profonde de Aujourd'hui et Progrès, planification des repas, liste de courses, estimation du délai de progression, vérification des correspondances d'images sur la vraie base.
+
+## Nouveautés de la version précédente
 - **Identité** : logo (anneau + barre), générique d'entrée animé (une fois par session, tap pour passer), thème sombre doré, navigation flottante, bulles au toucher (`ta.css`, `ta.js`).
 - **Mode entraînement immersif** (`ws.js`, `ws.css`) : plein écran, un exercice et une série à la fois, charge et répétitions en gros boutons, dernière performance, repos intégré (+15 s / −15 s / passer), validation en bas d'écran à une main, progression par exercice, bilan final (volume, séries, meilleures séries, record). Sauvegarde à chaque action ; si l'app est fermée, la séance et le repos en cours sont repris à la réouverture.
 - **Démonstrations** : source retenue **Free Exercise DB** (domaine public, sans clé, sans compte, 873 exercices). Ce sont **deux images (départ/arrivée) animées en fondu**, pas des vidéos : les API avec vraies vidéos ou GIF de qualité sont payantes ou limitées. Pause/lecture, chargement, et secours automatique sur l'animation vectorielle existante si l'exercice n'est pas trouvé ou si le réseau échoue. Fiche : muscles, consignes, erreurs fréquentes, étapes détaillées (en anglais, source).
